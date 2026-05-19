@@ -15,7 +15,7 @@ from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.graph import END, START, StateGraph
 from pydantic import BaseModel, Field, ValidationError
 
-from .workflow import AMLR_ARTICLES, build_audit_pack
+from .workflow import AMLR_ARTICLES, build_audit_pack, enrich_training_plan, source_pack
 
 
 OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
@@ -88,9 +88,18 @@ class RegulationMapperOutput(BaseModel):
 
 
 class TrainingModule(BaseModel):
+    moduleId: str | None = None
     title: str
     whyIncluded: str
+    whyExpanded: str | None = None
+    sourceRiskId: str | None = None
+    roleEvidence: str | None = None
+    amlrTrace: list[str] | None = None
+    competencyNeed: str | None = None
+    competencyType: str | None = None
     assessment: str
+    approvalStatus: str | None = None
+    lmsStatus: str | None = None
 
 
 class TrainingQuarter(BaseModel):
@@ -102,6 +111,10 @@ class TrainingQuarter(BaseModel):
 class LMSAssignment(BaseModel):
     learnerGroup: str
     status: str
+    approvalStatus: str | None = None
+    lmsStatus: str | None = None
+    owner: str | None = None
+    dueWindow: str | None = None
     mandatoryModules: int
     assessment: str
     refreshCycle: str
@@ -481,6 +494,7 @@ def article_scope(regulatory_scope: dict[str, Any] | None) -> dict[str, Any]:
 def format_agent_response(state: WorkflowState) -> dict[str, Any]:
     role = state["role"]
     quality = state["quality_review"]
+    training_plan = enrich_training_plan(state["training_plan"], state["matrix"])
     return {
         "workflowId": state["workflow_id"],
         "generatedAt": datetime.now(timezone.utc).isoformat(),
@@ -496,9 +510,10 @@ def format_agent_response(state: WorkflowState) -> dict[str, Any]:
         "agents": state["agents"],
         "parsedRole": state["parsed_role"],
         "riskRegulationMatrix": state["matrix"],
-        "trainingPlan": state["training_plan"],
+        "trainingPlan": training_plan,
         "qualityReview": quality,
         "auditPack": build_audit_pack(role, state["matrix"], quality),
+        "sourcePack": source_pack(),
     }
 
 

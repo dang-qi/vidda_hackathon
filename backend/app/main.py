@@ -9,9 +9,11 @@ from uuid import uuid4
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
 from .agent_graph import AGENT_STEPS, AgentGraphError, has_openrouter_key, run_agent_workflow
+from .storage import add_review_action, build_audit_export, get_run, init_db, list_runs, save_workflow_run
 from .workflow import ROLE_CATALOG, get_role, run_workflow
 
 
@@ -53,6 +55,21 @@ class AnalyzeRequest(BaseModel):
     trainingConstraints: dict[str, Any] | None = None
     reviewPolicy: dict[str, Any] | None = None
     regulatoryScope: dict[str, Any] | None = None
+
+
+class ReviewActionRequest(BaseModel):
+    artifactType: str = Field(default="matrix")
+    targetId: str
+    action: str
+    before: dict[str, Any] | None = None
+    after: dict[str, Any] | None = None
+    reviewer: str = Field(default="Demo reviewer")
+    comment: str | None = None
+
+
+@app.on_event("startup")
+def startup() -> None:
+    init_db()
 
 
 @app.get("/api/health")
@@ -111,6 +128,48 @@ def get_analyze_job(job_id: str) -> dict[str, Any]:
     return job_response(job_id)
 
 
+@app.get("/api/history/runs")
+def history_runs() -> list[dict[str, Any]]:
+    return list_runs()
+
+
+@app.get("/api/history/runs/{run_id}")
+def history_run(run_id: str) -> dict[str, Any]:
+    run = get_run(run_id)
+    if not run:
+        raise HTTPException(status_code=404, detail="Unknown workflow run")
+    return run
+
+
+@app.get("/api/history/runs/{run_id}/audit-pack")
+def export_audit_pack(run_id: str) -> JSONResponse:
+    run = get_run(run_id)
+    if not run:
+        raise HTTPException(status_code=404, detail="Unknown workflow run")
+    filename = f"{run_id}-audit-pack.json"
+    return JSONResponse(
+        build_audit_export(run),
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
+@app.post("/api/history/runs/{run_id}/review-actions")
+def create_review_action(run_id: str, request: ReviewActionRequest) -> dict[str, Any]:
+    try:
+        return add_review_action(
+            run_id=run_id,
+            artifact_type=request.artifactType,
+            target_id=request.targetId,
+            action=request.action,
+            before=request.before,
+            after=request.after,
+            reviewer=request.reviewer,
+            comment=request.comment,
+        )
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="Unknown workflow run") from exc
+
+
 @app.post("/api/analyze")
 def analyze(request: AnalyzeRequest) -> dict[str, Any]:
     try:
@@ -123,26 +182,31 @@ def analyze(request: AnalyzeRequest) -> dict[str, Any]:
 
     if request.useAgent:
         try:
-            return run_agent_workflow(
+            result = run_agent_workflow(
                 role=role,
                 organization_context=request.organizationContext,
                 training_constraints=request.trainingConstraints,
                 review_policy=request.reviewPolicy,
                 regulatory_scope=request.regulatoryScope,
             )
+            save_workflow_run(result)
+            return result
         except AgentGraphError as exc:
             fallback = run_workflow(role)
             fallback["executionMode"] = "deterministic-fallback"
             fallback["agentError"] = str(exc)
+            save_workflow_run(fallback)
             return fallback
         except Exception as exc:
             fallback = run_workflow(role)
             fallback["executionMode"] = "deterministic-fallback"
             fallback["agentError"] = f"LangGraph workflow failed: {exc}"
+            save_workflow_run(fallback)
             return fallback
 
     fallback = run_workflow(role)
     fallback["executionMode"] = "deterministic"
+    save_workflow_run(fallback)
     return fallback
 
 
@@ -181,17 +245,21 @@ def run_job(job_id: str, request: AnalyzeRequest, role: dict[str, Any], started:
         else:
             result = run_workflow(role)
             result["executionMode"] = "deterministic"
-        update_job(job_id, status="complete", result=result, elapsed_ms=round((time.monotonic() - started) * 1000))
+        elapsed_ms = round((time.monotonic() - started) * 1000)
+        save_workflow_run(result, job_id=job_id, elapsed_ms=elapsed_ms)
+        update_job(job_id, status="complete", result=result, elapsed_ms=elapsed_ms)
     except Exception as exc:
         fallback = run_workflow(role)
         fallback["executionMode"] = "deterministic-fallback"
         fallback["agentError"] = f"LangGraph workflow failed: {exc}"
+        elapsed_ms = round((time.monotonic() - started) * 1000)
+        save_workflow_run(fallback, job_id=job_id, elapsed_ms=elapsed_ms)
         update_job(
             job_id,
             status="complete",
             result=fallback,
             error=str(exc),
-            elapsed_ms=round((time.monotonic() - started) * 1000),
+            elapsed_ms=elapsed_ms,
         )
 
 

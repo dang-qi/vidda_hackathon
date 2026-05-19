@@ -32,6 +32,27 @@ AMLR_ARTICLES = {
     },
 }
 
+SOURCE_PACK = [
+    {
+        "name": "Hackathon challenge overview",
+        "file": "Vidda Solutions Learning Program Generation - Hackathon Information for developers.pdf",
+        "coverage": "Evaluation criteria, workflow expectations, risk-based training examples and LMS expectations.",
+        "status": "Loaded",
+    },
+    {
+        "name": "Role descriptions",
+        "file": "Vidda Solutions Learning Program Generation - Role Descriptions Hackathon.pdf",
+        "coverage": "Five role profiles with tasks, responsibilities, competencies and inherent AML risk exposure.",
+        "status": "Loaded",
+    },
+    {
+        "name": "AMLR 2024/1624 extract",
+        "file": "Vidda Solutions Learning Program Generation - AMLR 1624.pdf",
+        "coverage": "Articles 9-14 covering controls, risk assessment, compliance functions, training, integrity and breach reporting.",
+        "status": "Loaded",
+    },
+]
+
 
 ROLE_CATALOG = [
     {
@@ -191,6 +212,7 @@ def run_workflow(role: dict[str, Any]) -> dict[str, Any]:
         "trainingPlan": training,
         "qualityReview": quality,
         "auditPack": build_audit_pack(role, matrix, quality),
+        "sourcePack": source_pack(),
     }
 
 
@@ -309,7 +331,7 @@ def training_designer_agent(role: dict[str, Any], matrix: list[dict[str, Any]]) 
             "modules": modules[9:12],
         },
     ]
-    return {
+    training = {
         "title": f"{role['name']} role-based AMLR training path",
         "philosophy": "Risk exposure drives depth; AMLR traceability drives content; human approval preserves accountability.",
         "quarters": quarters,
@@ -317,12 +339,17 @@ def training_designer_agent(role: dict[str, Any], matrix: list[dict[str, Any]]) 
             {
                 "learnerGroup": role["name"],
                 "status": "Ready for approval",
+                "approvalStatus": "draft",
+                "lmsStatus": "Not assigned",
+                "owner": "Compliance Manager",
+                "dueWindow": "Year 1 phased rollout",
                 "mandatoryModules": len(modules),
                 "assessment": "Scenario-based competency check",
                 "refreshCycle": "Annual, or earlier after regulation, typology or internal finding changes",
             }
         ],
     }
+    return enrich_training_plan(training, matrix)
 
 
 def quality_reviewer_agent(role: dict[str, Any], matrix: list[dict[str, Any]], training: dict[str, Any]) -> dict[str, Any]:
@@ -398,7 +425,7 @@ def map_articles(item: dict[str, Any]) -> list[dict[str, str]]:
     ]
 
 
-def role_specific_modules(role_id: str, matrix: list[dict[str, Any]]) -> list[dict[str, str]]:
+def role_specific_modules(role_id: str, matrix: list[dict[str, Any]]) -> list[dict[str, Any]]:
     base = [
         ("AMLR role obligations briefing", "Article trace: Articles 9, 10, 11 and 12", "Knowledge check"),
         ("Risk-based decision making", "Explains how role risk changes training depth", "Scenario quiz"),
@@ -448,13 +475,86 @@ def role_specific_modules(role_id: str, matrix: list[dict[str, Any]]) -> list[di
             )
         )
     return [
-        {
-            "title": title,
-            "whyIncluded": why,
-            "assessment": assessment,
-        }
-        for title, why, assessment in modules[:12]
+        module_with_trace(title, why, assessment, matrix, index)
+        for index, (title, why, assessment) in enumerate(modules[:12])
     ]
+
+
+def module_with_trace(
+    title: str,
+    why: str,
+    assessment: str,
+    matrix: list[dict[str, Any]],
+    index: int,
+) -> dict[str, Any]:
+    row = matrix[index % len(matrix)]
+    articles = [article["article"] for article in row["amlrArticles"]]
+    return {
+        "moduleId": f"module-{index + 1}",
+        "title": title,
+        "whyIncluded": why,
+        "whyExpanded": (
+            f"Assigned because the role has {row['riskLevel'].lower()} {row['riskTheme'].lower()} "
+            f"exposure: {row['riskScenario']}. The module builds the competency needed to "
+            f"{row['competencyNeed'].lower()}"
+        ),
+        "sourceRiskId": row["id"],
+        "roleEvidence": row["roleEvidence"],
+        "amlrTrace": articles,
+        "competencyNeed": row["competencyNeed"],
+        "competencyType": competency_type_for(title, row),
+        "assessment": assessment,
+        "approvalStatus": "draft",
+        "lmsStatus": "Pending approval",
+    }
+
+
+def enrich_training_plan(training: dict[str, Any], matrix: list[dict[str, Any]]) -> dict[str, Any]:
+    if not matrix:
+        return training
+    module_index = 0
+    for quarter in training.get("quarters", []):
+        enriched_modules = []
+        for module in quarter.get("modules", []):
+            row = matrix[module_index % len(matrix)]
+            articles = [article["article"] for article in row.get("amlrArticles", [])]
+            module = {
+                **module,
+                "moduleId": module.get("moduleId") or f"module-{module_index + 1}",
+                "whyExpanded": module.get("whyExpanded") or (
+                    f"Assigned because the role evidence maps to {row['riskScenario']} "
+                    f"and requires {row['competencyNeed'].lower()}"
+                ),
+                "sourceRiskId": module.get("sourceRiskId") or row["id"],
+                "roleEvidence": module.get("roleEvidence") or row["roleEvidence"],
+                "amlrTrace": module.get("amlrTrace") or articles,
+                "competencyNeed": module.get("competencyNeed") or row["competencyNeed"],
+                "competencyType": module.get("competencyType") or competency_type_for(module.get("title", ""), row),
+                "approvalStatus": module.get("approvalStatus") or "draft",
+                "lmsStatus": module.get("lmsStatus") or "Pending approval",
+            }
+            enriched_modules.append(module)
+            module_index += 1
+        quarter["modules"] = enriched_modules
+    for assignment in training.get("lmsAssignments", []):
+        assignment.setdefault("approvalStatus", "draft")
+        assignment.setdefault("lmsStatus", "Not assigned")
+        assignment.setdefault("owner", "Compliance Manager")
+        assignment.setdefault("dueWindow", "Year 1 phased rollout")
+    return training
+
+
+def competency_type_for(title: str, row: dict[str, Any]) -> str:
+    text = f"{title} {row.get('competencyNeed', '')}".lower()
+    if any(word in text for word in ["judge", "decision", "rationale", "escalation", "scenario"]):
+        return "Judgement"
+    if any(word in text for word in ["write", "documentation", "case", "screening", "analysis", "workflow"]):
+        return "Skill"
+    return "Knowledge"
+
+
+def source_pack() -> list[dict[str, str]]:
+    return [dict(source) for source in SOURCE_PACK]
 
 
 def risk(theme: str, level: str, scenario: str, evidence: str, impact: str) -> dict[str, str]:
