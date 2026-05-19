@@ -115,3 +115,12 @@ curl -s -X POST http://127.0.0.1:8000/api/analyze/start \
 
 curl -s http://127.0.0.1:8000/api/analyze/jobs/job_xxxxx
 ```
+
+## DevOps
+
+This repository ships with a small DevOps baseline.
+
+- **`CONTRIBUTING.md`** — local setup using Python venv, environment config, branch/commit conventions, PR workflow. Start here when onboarding.
+- **`.env.example`** — template for the OpenRouter environment variables read by `backend/app/agent_graph.py` (1 required, 6 optional overrides). Copy to `.env` and fill in `OPENROUTER_API_KEY`. Real `.env` files are gitignored and must never be committed.
+- **`.github/workflows/ci.yml`** — GitHub Actions workflow that runs on every push and pull request to `main`. It installs `backend/requirements.txt` on Python 3.12 and runs a smoke import check on `backend.app` to catch broken imports before merge. No real API calls are made in CI.
+- **`.gitignore`** — excludes `.env` (secrets) and `CLAUDE.md` (local AI-assistant context) from the repo.
