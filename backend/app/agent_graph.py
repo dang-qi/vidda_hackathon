@@ -15,7 +15,14 @@ from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.graph import END, START, StateGraph
 from pydantic import BaseModel, Field, ValidationError
 
-from .workflow import AMLR_ARTICLES, build_audit_pack, enrich_training_plan, source_pack
+from .workflow import (
+    AMLR_ARTICLES,
+    apply_country_overrides,
+    build_audit_pack,
+    enrich_training_plan,
+    get_country_override,
+    source_pack,
+)
 
 
 OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
@@ -330,21 +337,29 @@ def risk_mapper_node(state: WorkflowState) -> dict[str, Any]:
 
 def regulation_mapper_node(state: WorkflowState) -> dict[str, Any]:
     articles = article_scope(state.get("regulatory_scope"))
+    country_code = (state.get("regulatory_scope") or {}).get("country")
+    country_context = country_prompt_context(country_code)
+    payload: dict[str, Any] = {
+        "task": "For each risk, produce one matrix row linking risk evidence to AMLR article traces, competency need, training depth, confidence and human review status.",
+        "risks": state["risks"],
+        "parsed_role": state["parsed_role"],
+        "available_amlr_articles": articles,
+        "review_policy": state["review_policy"],
+        "requirements": [
+            "Use only available_amlr_articles in the amlrArticles[] field.",
+            "Set humanReview to needs-review for High or Critical risk unless policy says otherwise.",
+            "Confidence should reflect evidence strength, not model certainty theatre.",
+        ],
+    }
+    if country_context:
+        payload["national_context"] = country_context
+        payload["requirements"].append(
+            "When relevant, the whyItMatters and roleEvidence text should reference the national_context citations (e.g. FFFS 2017:11, Ley 10/2010, GwG) in addition to AMLR — but keep amlrArticles[] strictly to AMLR articles from available_amlr_articles."
+        )
     mapped = call_json_model(
         RegulationMapperOutput,
         "You are the Regulation Mapper Agent. Link role risks to AMLR articles and competency needs.",
-        {
-            "task": "For each risk, produce one matrix row linking risk evidence to AMLR article traces, competency need, training depth, confidence and human review status.",
-            "risks": state["risks"],
-            "parsed_role": state["parsed_role"],
-            "available_amlr_articles": articles,
-            "review_policy": state["review_policy"],
-            "requirements": [
-                "Use only available_amlr_articles.",
-                "Set humanReview to needs-review for High or Critical risk unless policy says otherwise.",
-                "Confidence should reflect evidence strength, not model certainty theatre.",
-            ],
-        },
+        payload,
     )
     rows = [normalize_matrix_row(row.model_dump()) for row in mapped.rows]
     return {
@@ -360,21 +375,29 @@ def regulation_mapper_node(state: WorkflowState) -> dict[str, Any]:
 
 
 def training_designer_node(state: WorkflowState) -> dict[str, Any]:
+    country_code = (state.get("regulatory_scope") or {}).get("country")
+    country_context = country_prompt_context(country_code)
+    payload: dict[str, Any] = {
+        "task": "Create a 4-quarter training path. Each module must be justified by a mapped risk, AMLR article, or competency need.",
+        "role": state["role"],
+        "matrix": state["matrix"],
+        "training_constraints": state["training_constraints"],
+        "organization_context": state["organization_context"],
+        "requirements": [
+            "The plan must not be generic AML awareness only.",
+            "Include scenario-based assessment for high-risk or critical mappings.",
+            "LMS assignment must be ready for approval, not silently approved.",
+        ],
+    }
+    if country_context:
+        payload["national_context"] = country_context
+        payload["requirements"].append(
+            f"Tailor module titles, philosophy and assessment style to {country_context['name']} regulatory practice. A separate country-mandatory module will be added deterministically — do not duplicate it."
+        )
     training = call_json_model(
         TrainingPlanOutput,
         "You are the Training Designer Agent. Produce a role-based training path.",
-        {
-            "task": "Create a 4-quarter training path. Each module must be justified by a mapped risk, AMLR article, or competency need.",
-            "role": state["role"],
-            "matrix": state["matrix"],
-            "training_constraints": state["training_constraints"],
-            "organization_context": state["organization_context"],
-            "requirements": [
-                "The plan must not be generic AML awareness only.",
-                "Include scenario-based assessment for high-risk or critical mappings.",
-                "LMS assignment must be ready for approval, not silently approved.",
-            ],
-        },
+        payload,
     )
     return {
         "training_plan": training.model_dump(),
@@ -505,6 +528,19 @@ def stringify_content(content: Any) -> str:
     return str(content)
 
 
+def country_prompt_context(country_code: str | None) -> dict[str, Any] | None:
+    override = get_country_override(country_code)
+    if not override:
+        return None
+    return {
+        "code": override["code"],
+        "name": override["name"],
+        "additional_citations": override["additionalCitations"],
+        "training_frequency_default": override["trainingFrequencyDefault"],
+        "independent_review_requirement": override["independentReviewLabel"],
+    }
+
+
 def article_scope(regulatory_scope: dict[str, Any] | None) -> dict[str, Any]:
     requested = (regulatory_scope or {}).get("articles") or ["9", "10", "11", "12", "13", "14"]
     normalized = [str(article).replace("Article", "").strip() for article in requested]
@@ -519,7 +555,8 @@ def format_agent_response(state: WorkflowState) -> dict[str, Any]:
     role = state["role"]
     quality = state["quality_review"]
     training_plan = enrich_training_plan(state["training_plan"], state["matrix"])
-    return {
+    country_code = (state.get("regulatory_scope") or {}).get("country")
+    response: dict[str, Any] = {
         "workflowId": state["workflow_id"],
         "generatedAt": datetime.now(timezone.utc).isoformat(),
         "executionMode": "langgraph-openrouter",
@@ -539,6 +576,8 @@ def format_agent_response(state: WorkflowState) -> dict[str, Any]:
         "auditPack": build_audit_pack(role, state["matrix"], quality),
         "sourcePack": source_pack(),
     }
+    apply_country_overrides(response, country_code)
+    return response
 
 
 def agent_summary(name: str, summary: str) -> dict[str, str]:

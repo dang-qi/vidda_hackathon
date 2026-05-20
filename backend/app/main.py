@@ -181,6 +181,8 @@ def analyze(request: AnalyzeRequest) -> dict[str, Any]:
     except KeyError as exc:
         raise HTTPException(status_code=404, detail="Unknown role id") from exc
 
+    country_code = (request.regulatoryScope or {}).get("country") if request.regulatoryScope else None
+
     if request.useAgent:
         try:
             result = run_agent_workflow(
@@ -193,19 +195,19 @@ def analyze(request: AnalyzeRequest) -> dict[str, Any]:
             save_workflow_run(result)
             return result
         except AgentGraphError as exc:
-            fallback = run_workflow(role)
+            fallback = run_workflow(role, country_code=country_code)
             fallback["executionMode"] = "deterministic-fallback"
             fallback["agentError"] = str(exc)
             save_workflow_run(fallback)
             return fallback
         except Exception as exc:
-            fallback = run_workflow(role)
+            fallback = run_workflow(role, country_code=country_code)
             fallback["executionMode"] = "deterministic-fallback"
             fallback["agentError"] = f"LangGraph workflow failed: {exc}"
             save_workflow_run(fallback)
             return fallback
 
-    fallback = run_workflow(role)
+    fallback = run_workflow(role, country_code=country_code)
     fallback["executionMode"] = "deterministic"
     save_workflow_run(fallback)
     return fallback
@@ -235,6 +237,8 @@ def run_job(job_id: str, request: AnalyzeRequest, role: dict[str, Any], started:
                         step["output"] = payload["output"]
                     break
 
+    country_code = (request.regulatoryScope or {}).get("country") if request.regulatoryScope else None
+
     try:
         if request.useAgent:
             result = run_agent_workflow(
@@ -246,13 +250,13 @@ def run_job(job_id: str, request: AnalyzeRequest, role: dict[str, Any], started:
                 progress_callback=progress_callback,
             )
         else:
-            result = run_workflow(role)
+            result = run_workflow(role, country_code=country_code)
             result["executionMode"] = "deterministic"
         elapsed_ms = round((time.monotonic() - started) * 1000)
         save_workflow_run(result, job_id=job_id, elapsed_ms=elapsed_ms)
         update_job(job_id, status="complete", result=result, elapsed_ms=elapsed_ms)
     except Exception as exc:
-        fallback = run_workflow(role)
+        fallback = run_workflow(role, country_code=country_code)
         fallback["executionMode"] = "deterministic-fallback"
         fallback["agentError"] = f"LangGraph workflow failed: {exc}"
         elapsed_ms = round((time.monotonic() - started) * 1000)

@@ -41,11 +41,41 @@ const loadedSources = [
   },
 ];
 
+const COUNTRIES = [
+  {
+    code: "SE",
+    name: "Sweden",
+    flag: "🇸🇪",
+    confidence: 88,
+    tagline: "Centralt funktionsansvarig + independent review function",
+  },
+  {
+    code: "ES",
+    name: "Spain",
+    flag: "🇪🇸",
+    confidence: 90,
+    tagline: "OCI + annual external expert review (Ley 10/2010)",
+  },
+  {
+    code: "DE",
+    name: "Germany",
+    flag: "🇩🇪",
+    confidence: 85,
+    tagline: "Geldwäschebeauftragter + deputy MLRO (GwG §6/§7)",
+  },
+];
+
 function App() {
   const [roles, setRoles] = useState([]);
   const [selectedRole, setSelectedRole] = useState("kyc-analyst");
+  const [selectedCountry, setSelectedCountry] = useState("SE");
   const [roleForm, setRoleForm] = useState(emptyRoleForm);
   const [analysis, setAnalysis] = useState(null);
+  const [cachedAnalyses, setCachedAnalyses] = useState({});
+  const [prefetchStatus, setPrefetchStatus] = useState({});
+  const [compareCountry, setCompareCountry] = useState(null);
+  const [compareAnalysis, setCompareAnalysis] = useState(null);
+  const [compareLoading, setCompareLoading] = useState(false);
   const [activeStep, setActiveStep] = useState("role");
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState("");
@@ -89,6 +119,7 @@ function App() {
         if (savedJob.status === "complete" && savedJob.result) {
           safeStorageSet(LAST_RUN_KEY, savedJob.result.workflowId);
           setAnalysis(savedJob.result);
+          cacheAnalysisAndPrefetch(savedJob.result);
           setActiveStep("matrix");
           setIsLoading(false);
           loadHistory();
@@ -126,6 +157,7 @@ function App() {
           safeStorageRemove(ACTIVE_JOB_KEY);
           safeStorageSet(LAST_RUN_KEY, nextJob.result.workflowId);
           setAnalysis(nextJob.result);
+          cacheAnalysisAndPrefetch(nextJob.result);
           setActiveStep("matrix");
           setIsLoading(false);
           loadHistory();
@@ -151,6 +183,57 @@ function App() {
     return () => window.clearInterval(interval);
   }, [activeJobId, activeJobStatus]);
 
+  function cacheAnalysisAndPrefetch(result) {
+    const countryCode = result?.countryOverlay?.code;
+    if (!countryCode) return;
+    setCachedAnalyses((current) => ({ ...current, [countryCode]: result }));
+    setPrefetchStatus((current) => ({ ...current, [countryCode]: "ready" }));
+    COUNTRIES.filter((c) => c.code !== countryCode).forEach((country) => {
+      prefetchCountry(country.code);
+    });
+  }
+
+  async function prefetchCountry(targetCountry) {
+    setPrefetchStatus((current) => {
+      if (current[targetCountry] === "ready" || current[targetCountry] === "loading") {
+        return current;
+      }
+      return { ...current, [targetCountry]: "loading" };
+    });
+    try {
+      const body = { ...buildAnalysisBody(targetCountry), useAgent: false };
+      const response = await fetch(`${API_BASE}/api/analyze`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      if (!response.ok) {
+        throw new Error("prefetch failed");
+      }
+      const data = await response.json();
+      setCachedAnalyses((current) => ({ ...current, [targetCountry]: data }));
+      setPrefetchStatus((current) => ({ ...current, [targetCountry]: "ready" }));
+    } catch {
+      setPrefetchStatus((current) => ({ ...current, [targetCountry]: "error" }));
+    }
+  }
+
+  function buildAnalysisBody(countryCode) {
+    const rolePayload = buildCustomRolePayload(roleForm);
+    const presetRole = roles.find((role) => role.id === selectedRole);
+    const formMatchesPreset = presetRole && presetRole.name === roleForm.name;
+    return {
+      ...(formMatchesPreset ? { roleId: selectedRole } : { customRole: rolePayload }),
+      useAgent: true,
+      regulatoryScope: {
+        jurisdiction: "EU",
+        regulation: "AMLR 2024/1624",
+        articles: ["9", "10", "11", "12", "13", "14"],
+        country: countryCode,
+      },
+    };
+  }
+
   async function runAnalysis() {
     const rolePayload = buildCustomRolePayload(roleForm);
     if (!rolePayload.name || rolePayload.description.length < 20) {
@@ -160,13 +243,17 @@ function App() {
     setIsLoading(true);
     setError("");
     setAnalysis(null);
+    setCachedAnalyses({});
+    setPrefetchStatus({});
+    setCompareAnalysis(null);
+    setCompareCountry(null);
     setJob(null);
     setNowMs(Date.now());
     try {
       const response = await fetch(`${API_BASE}/api/analyze/start`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ customRole: rolePayload, useAgent: true }),
+        body: JSON.stringify(buildAnalysisBody(selectedCountry)),
       });
       if (!response.ok) {
         throw new Error("analysis failed");
@@ -177,6 +264,82 @@ function App() {
     } catch (err) {
       setError("Could not generate the workflow. Check that the backend is running.");
       setIsLoading(false);
+    }
+  }
+
+  async function switchCountry(targetCountry) {
+    if (!targetCountry || targetCountry === selectedCountry) {
+      return;
+    }
+    setCompareAnalysis(null);
+    setCompareCountry(null);
+    setError("");
+
+    const cached = cachedAnalyses[targetCountry];
+    if (cached) {
+      setSelectedCountry(targetCountry);
+      setAnalysis(cached);
+      return;
+    }
+
+    // Cache miss — fall back to a live deterministic run so the swap is still
+    // fast enough for the demo. The LLM-quality run is what the user got first;
+    // subsequent jurisdictions reuse the deterministic engine.
+    setSelectedCountry(targetCountry);
+    setPrefetchStatus((current) => ({ ...current, [targetCountry]: "loading" }));
+    try {
+      const body = { ...buildAnalysisBody(targetCountry), useAgent: false };
+      const response = await fetch(`${API_BASE}/api/analyze`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      if (!response.ok) {
+        throw new Error("switch failed");
+      }
+      const data = await response.json();
+      setCachedAnalyses((current) => ({ ...current, [targetCountry]: data }));
+      setPrefetchStatus((current) => ({ ...current, [targetCountry]: "ready" }));
+      setAnalysis(data);
+    } catch (err) {
+      setPrefetchStatus((current) => ({ ...current, [targetCountry]: "error" }));
+      setError("Could not switch jurisdiction.");
+    }
+  }
+
+  async function runComparisonAnalysis(targetCountry) {
+    if (!analysis || !targetCountry || targetCountry === selectedCountry) {
+      return;
+    }
+    setCompareCountry(targetCountry);
+
+    const cached = cachedAnalyses[targetCountry];
+    if (cached) {
+      setCompareAnalysis(cached);
+      return;
+    }
+
+    setCompareAnalysis(null);
+    setCompareLoading(true);
+    try {
+      const body = { ...buildAnalysisBody(targetCountry), useAgent: false };
+      const response = await fetch(`${API_BASE}/api/analyze`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      if (!response.ok) {
+        throw new Error("comparison failed");
+      }
+      const data = await response.json();
+      setCachedAnalyses((current) => ({ ...current, [targetCountry]: data }));
+      setPrefetchStatus((current) => ({ ...current, [targetCountry]: "ready" }));
+      setCompareAnalysis(data);
+    } catch (err) {
+      setError("Could not run the comparison workflow.");
+      setCompareCountry(null);
+    } finally {
+      setCompareLoading(false);
     }
   }
 
@@ -447,10 +610,29 @@ function App() {
               isLoading={isLoading}
               job={job}
               nowMs={nowMs}
+              selectedCountry={selectedCountry}
+              setSelectedCountry={setSelectedCountry}
             />
           )}
           {activeStep === "matrix" && analysis && (
-            <MatrixView analysis={analysis} updateReview={updateReview} />
+            <MatrixView
+              analysis={analysis}
+              updateReview={updateReview}
+              selectedCountry={selectedCountry}
+              switchCountry={switchCountry}
+              isLoading={isLoading}
+              job={job}
+              nowMs={nowMs}
+              prefetchStatus={prefetchStatus}
+              compareCountry={compareCountry}
+              compareAnalysis={compareAnalysis}
+              compareLoading={compareLoading}
+              runComparisonAnalysis={runComparisonAnalysis}
+              clearComparison={() => {
+                setCompareCountry(null);
+                setCompareAnalysis(null);
+              }}
+            />
           )}
           {activeStep === "training" && analysis && (
             <TrainingView analysis={analysis} />
@@ -502,7 +684,10 @@ function RoleIntake({
   isLoading,
   job,
   nowMs,
+  selectedCountry,
+  setSelectedCountry,
 }) {
+  const activeCountry = COUNTRIES.find((c) => c.code === selectedCountry) ?? COUNTRIES[0];
   function updateField(field, value) {
     setRoleForm((current) => ({ ...current, [field]: value }));
   }
@@ -545,6 +730,32 @@ function RoleIntake({
             <small>{role.persona}</small>
           </button>
         ))}
+      </div>
+
+      <div className="country-picker">
+        <div className="section-heading inline">
+          <p className="section-kicker">National overlay</p>
+          <h3>Jurisdiction</h3>
+          <p>The same EU regulation lands differently in each member state. Pick a country to layer national law on top of AMLR.</p>
+        </div>
+        <div className="country-grid">
+          {COUNTRIES.map((country) => (
+            <button
+              key={country.code}
+              type="button"
+              className={`country-card ${selectedCountry === country.code ? "is-selected" : ""}`}
+              onClick={() => setSelectedCountry(country.code)}
+            >
+              <span className="country-flag" aria-hidden="true">{country.flag}</span>
+              <strong>{country.name}</strong>
+              <small className="country-tagline">{country.tagline}</small>
+              <span className="country-conf">Confidence {country.confidence}%</span>
+            </button>
+          ))}
+        </div>
+        <p className="country-note">
+          Active: {activeCountry.flag} <strong>{activeCountry.name}</strong> — citations, role labels and one mandatory module will be tailored to this jurisdiction.
+        </p>
       </div>
 
       <div className="role-form">
@@ -1078,7 +1289,30 @@ function markTrainingPlan(trainingPlan, status) {
   };
 }
 
-function MatrixView({ analysis, updateReview }) {
+function MatrixView({
+  analysis,
+  updateReview,
+  selectedCountry,
+  switchCountry,
+  isLoading,
+  job,
+  nowMs,
+  prefetchStatus,
+  compareCountry,
+  compareAnalysis,
+  compareLoading,
+  runComparisonAnalysis,
+  clearComparison,
+}) {
+  const overlay = analysis.countryOverlay;
+  const compareOverlay = compareAnalysis?.countryOverlay;
+  const activeCountryCode = selectedCountry || overlay?.code;
+  const compareOptions = COUNTRIES.filter((c) => c.code !== activeCountryCode);
+  const switchTarget =
+    isLoading && selectedCountry && overlay && selectedCountry !== overlay.code
+      ? COUNTRIES.find((c) => c.code === selectedCountry)
+      : null;
+
   return (
     <div className="panel-section">
       <div className="section-heading">
@@ -1090,6 +1324,15 @@ function MatrixView({ analysis, updateReview }) {
         </p>
       </div>
 
+      {switchTarget && (
+        <div className="switching-banner">
+          <span className="switching-spinner" aria-hidden="true" />
+          <strong>Re-running agents for {switchTarget.flag} {switchTarget.name}…</strong>
+          <small>The matrix below still shows the previous jurisdiction. It will swap in when the new run completes.</small>
+          {job && <AgentProgress job={job} nowMs={nowMs} />}
+        </div>
+      )}
+
       <div className="agent-strip">
         {analysis.agents.map((agent) => (
           <div key={agent.name} className="agent-pill">
@@ -1099,61 +1342,281 @@ function MatrixView({ analysis, updateReview }) {
         ))}
       </div>
 
-      <div className="matrix-table">
-        <div className="matrix-header">
-          <span>Risk</span>
-          <span>Role risk evidence</span>
-          <span>AMLR trace</span>
-          <span>Human review</span>
-        </div>
-        {analysis.riskRegulationMatrix.map((row) => (
-          <div key={row.id} className="matrix-row">
-            <div>
-              <strong>{row.riskScenario}</strong>
-              <div className="risk-meta">
-                <span>Theme: {row.riskTheme}</span>
-                <span>Level: {row.riskLevel}</span>
-                <span>Evidence strength: {row.confidence}%</span>
+      {overlay && (
+        <CountryOverlayBanner
+          overlay={overlay}
+          activeCountryCode={activeCountryCode}
+          isLoading={isLoading}
+          onSwitch={switchCountry}
+          prefetchStatus={prefetchStatus}
+          compareOptions={compareOptions}
+          compareCountry={compareCountry}
+          compareAnalysis={compareAnalysis}
+          compareLoading={compareLoading}
+          onCompare={runComparisonAnalysis}
+          onClearCompare={clearComparison}
+        />
+      )}
+
+      {compareOverlay && compareAnalysis ? (
+        <CompareMatrix
+          baseAnalysis={analysis}
+          baseOverlay={overlay}
+          compareAnalysis={compareAnalysis}
+          compareOverlay={compareOverlay}
+        />
+      ) : (
+        <div className="matrix-table">
+          <div className="matrix-header">
+            <span>Risk</span>
+            <span>Role risk evidence</span>
+            <span>AMLR trace{overlay ? " + national" : ""}</span>
+            <span>Human review</span>
+          </div>
+          {analysis.riskRegulationMatrix.map((row) => (
+            <div key={row.id} className="matrix-row">
+              <div>
+                <strong>{row.riskScenario}</strong>
+                <div className="risk-meta">
+                  <span>Theme: {row.riskTheme}</span>
+                  <span>Level: {row.riskLevel}</span>
+                  <span>Evidence strength: {row.confidence}%</span>
+                </div>
+                {row.localRoleLabel && (
+                  <div className="local-role-label" title="Localised role label for this jurisdiction">
+                    {overlay?.flag} {row.localRoleLabel}
+                  </div>
+                )}
+              </div>
+              <div>
+                <p>{row.roleEvidence}</p>
+                <small>{row.competencyNeed}</small>
+              </div>
+              <div className="article-list">
+                {row.amlrArticles.map((article) => (
+                  <span
+                    key={article.article}
+                    className="article-badge"
+                    tabIndex="0"
+                    aria-label={`${article.article}: ${article.title}. ${article.rationale}`}
+                  >
+                    {article.article}
+                    <span className="article-tooltip" role="tooltip">
+                      <strong>{article.title}</strong>
+                      <small>{article.rationale}</small>
+                    </span>
+                  </span>
+                ))}
+                {(row.nationalCitations ?? []).map((cit) => (
+                  <span
+                    key={`${cit.law}-${cit.section}`}
+                    className="article-badge national"
+                    tabIndex="0"
+                    aria-label={`${cit.law} ${cit.section}: ${cit.topic}`}
+                  >
+                    {overlay?.flag} {cit.law} {cit.section}
+                    <span className="article-tooltip" role="tooltip">
+                      <strong>{cit.law} {cit.section}</strong>
+                      <small>{cit.rationale}</small>
+                    </span>
+                  </span>
+                ))}
+              </div>
+              <div>
+                <select value={row.humanReview} onChange={(event) => updateReview(row.id, event.target.value)}>
+                  {reviewOptions.map((option) => (
+                    <option value={option.value} key={option.value}>
+                      {option.label}
+                    </option>
+                  ))}
+                </select>
               </div>
             </div>
-            <div>
-              <p>{row.roleEvidence}</p>
-              <small>{row.competencyNeed}</small>
-            </div>
-            <div className="article-list">
-              {row.amlrArticles.map((article) => (
-                <span
-                  key={article.article}
-                  className="article-badge"
-                  tabIndex="0"
-                  aria-label={`${article.article}: ${article.title}. ${article.rationale}`}
-                >
-                  {article.article}
-                  <span className="article-tooltip" role="tooltip">
-                    <strong>{article.title}</strong>
-                    <small>{article.rationale}</small>
-                  </span>
-                </span>
-              ))}
-            </div>
-            <div>
-              <select value={row.humanReview} onChange={(event) => updateReview(row.id, event.target.value)}>
-                {reviewOptions.map((option) => (
-                  <option value={option.value} key={option.value}>
-                    {option.label}
-                  </option>
-                ))}
-              </select>
-            </div>
-          </div>
-        ))}
-      </div>
+          ))}
+        </div>
+      )}
     </div>
   );
 }
 
+function CountryOverlayBanner({
+  overlay,
+  activeCountryCode,
+  isLoading,
+  onSwitch,
+  prefetchStatus = {},
+  compareOptions,
+  compareCountry,
+  compareAnalysis,
+  compareLoading,
+  onCompare,
+  onClearCompare,
+}) {
+  return (
+    <section className={`country-overlay-banner country-${overlay.code.toLowerCase()}`} aria-label="National overlay">
+      <div className="country-overlay-head">
+        <div>
+          <span className="country-flag-large" aria-hidden="true">{overlay.flag}</span>
+          <div>
+            <p className="section-kicker">National overlay</p>
+            <h3>{overlay.name}</h3>
+            <small>Confidence {overlay.confidence}% · {overlay.confidenceRationale}</small>
+          </div>
+        </div>
+        <div className="country-overlay-meta">
+          <div>
+            <span>Training default</span>
+            <strong>{overlay.trainingFrequencyDefault}</strong>
+          </div>
+          <div>
+            <span>Independent review</span>
+            <strong>{overlay.independentReviewLabel}</strong>
+          </div>
+        </div>
+      </div>
+      <div className="country-overlay-citations">
+        <span>National laws on the stack:</span>
+        {overlay.sourceLaws.map((law) => (
+          <a key={law.url} href={law.url} target="_blank" rel="noreferrer" className="country-source-link">
+            {law.title}
+          </a>
+        ))}
+      </div>
+      <div className="country-overlay-switch">
+        <span>Switch jurisdiction (cached, instant):</span>
+        {COUNTRIES.map((country) => {
+          const cacheState = prefetchStatus[country.code];
+          const isCurrent = activeCountryCode === country.code;
+          const isReady = isCurrent || cacheState === "ready";
+          const isWarming = !isCurrent && cacheState === "loading";
+          return (
+            <button
+              key={country.code}
+              type="button"
+              className={`country-switch-chip ${isCurrent ? "is-active" : ""}`}
+              onClick={() => onSwitch && onSwitch(country.code)}
+              disabled={isCurrent || isWarming}
+              title={isCurrent ? "Currently showing" : isReady ? "Cached — instant swap" : isWarming ? "Pre-fetching…" : "Will fetch on click"}
+            >
+              {country.flag} {country.name}
+              {isCurrent && <small className="chip-status">· now</small>}
+              {!isCurrent && isReady && <small className="chip-status ready">· cached</small>}
+              {isWarming && <small className="chip-status warming">· warming…</small>}
+            </button>
+          );
+        })}
+      </div>
+      <div className="country-overlay-compare">
+        <span>Or compare side-by-side:</span>
+        {compareOptions.map((country) => {
+          const cacheState = prefetchStatus[country.code];
+          const isWarming = cacheState === "loading";
+          return (
+            <button
+              key={country.code}
+              type="button"
+              className={`country-compare-chip ${compareCountry === country.code ? "is-active" : ""}`}
+              onClick={() => onCompare(country.code)}
+              disabled={compareLoading || isWarming}
+              title={cacheState === "ready" ? "Cached — instant compare" : isWarming ? "Pre-fetching…" : "Will fetch on click"}
+            >
+              {country.flag} vs {overlay.flag}
+              {cacheState === "ready" && <small className="chip-status ready">· cached</small>}
+              {isWarming && <small className="chip-status warming">· warming…</small>}
+            </button>
+          );
+        })}
+        {(compareCountry || compareAnalysis) && (
+          <button type="button" className="country-compare-clear" onClick={onClearCompare}>
+            Clear comparison
+          </button>
+        )}
+        {compareLoading && <span className="compare-loading">Running comparison…</span>}
+      </div>
+    </section>
+  );
+}
+
+function CompareMatrix({ baseAnalysis, baseOverlay, compareAnalysis, compareOverlay }) {
+  const baseRows = baseAnalysis.riskRegulationMatrix;
+  const compareRows = compareAnalysis.riskRegulationMatrix;
+  const pairs = baseRows.map((row, index) => ({
+    base: row,
+    compare: compareRows[index] || null,
+  }));
+  return (
+    <div className="compare-matrix">
+      <div className="compare-header">
+        <div>
+          <span>{baseOverlay?.flag} {baseOverlay?.name}</span>
+          <small>{baseOverlay?.trainingFrequencyDefault}</small>
+        </div>
+        <div className="compare-vs">vs</div>
+        <div>
+          <span>{compareOverlay?.flag} {compareOverlay?.name}</span>
+          <small>{compareOverlay?.trainingFrequencyDefault}</small>
+        </div>
+      </div>
+      {pairs.map(({ base, compare }, index) => (
+        <div key={base.id} className="compare-row">
+          <div className="compare-risk">
+            <strong>{index + 1}. {base.riskScenario}</strong>
+            <small>{base.riskTheme} · {base.riskLevel}</small>
+          </div>
+          <div className="compare-pair">
+            <CompareCell row={base} overlay={baseOverlay} />
+            <CompareCell row={compare} overlay={compareOverlay} />
+          </div>
+          {compare && (
+            <p className="compare-why">
+              <span>Why different?</span>{" "}
+              {whyCountriesDiffer(base, compare, baseOverlay, compareOverlay)}
+            </p>
+          )}
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function CompareCell({ row, overlay }) {
+  if (!row || !overlay) {
+    return <div className="compare-cell empty">No matching row</div>;
+  }
+  return (
+    <div className="compare-cell">
+      <div className="compare-role-label">{overlay.flag} {row.localRoleLabel || overlay.name}</div>
+      <div className="compare-articles">
+        {row.amlrArticles.map((a) => (
+          <span key={a.article} className="article-badge">{a.article}</span>
+        ))}
+        {(row.nationalCitations ?? []).map((cit) => (
+          <span key={`${cit.law}-${cit.section}`} className="article-badge national">
+            {overlay.flag} {cit.law} {cit.section}
+          </span>
+        ))}
+      </div>
+      <small>{row.competencyNeed}</small>
+    </div>
+  );
+}
+
+function whyCountriesDiffer(baseRow, compareRow, baseOverlay, compareOverlay) {
+  if (!baseOverlay || !compareOverlay) return "";
+  const baseLaws = (baseRow.nationalCitations ?? []).map((c) => `${c.law} ${c.section}`.trim()).join(", ");
+  const compareLaws = (compareRow.nationalCitations ?? []).map((c) => `${c.law} ${c.section}`.trim()).join(", ");
+  const baseReview = baseOverlay.independentReviewLabel;
+  const compareReview = compareOverlay.independentReviewLabel;
+  if (baseReview === compareReview) {
+    return `Same risk, different national grounding: ${baseOverlay.name} cites ${baseLaws}; ${compareOverlay.name} cites ${compareLaws}.`;
+  }
+  return `${baseOverlay.name} requires ${baseReview.toLowerCase()} (${baseLaws}); ${compareOverlay.name} requires ${compareReview.toLowerCase()} (${compareLaws}).`;
+}
+
 function TrainingView({ analysis }) {
   const allModules = analysis.trainingPlan.quarters.flatMap((quarter) => quarter.modules);
+  const overlay = analysis.countryOverlay;
+  const mandatoryCount = allModules.filter((module) => module.countryMandatory).length;
   return (
     <div className="panel-section">
       <div className="section-heading">
@@ -1175,6 +1638,12 @@ function TrainingView({ analysis }) {
           <span>AMLR trace</span>
           <strong>{uniqueArticlesFromModules(allModules).join(", ") || "Pending"}</strong>
         </div>
+        {overlay && (
+          <div>
+            <span>{overlay.flag} {overlay.name} mandatory</span>
+            <strong>{mandatoryCount} module{mandatoryCount === 1 ? "" : "s"}</strong>
+          </div>
+        )}
       </div>
 
       <div className="quarter-grid">
@@ -1184,8 +1653,15 @@ function TrainingView({ analysis }) {
             <p>{quarter.focus}</p>
             <ul>
               {quarter.modules.map((module) => (
-                <li key={module.moduleId || module.title}>
-                  <strong>{module.title}</strong>
+                <li key={module.moduleId || module.title} className={module.countryMandatory ? "module-country-mandatory" : ""}>
+                  <strong>
+                    {module.countryMandatory && overlay && (
+                      <span className="country-tag" title={`Required by ${overlay.name} national law`}>
+                        {overlay.flag} National
+                      </span>
+                    )}
+                    {module.title}
+                  </strong>
                   <span>{module.whyIncluded}</span>
                   <small>{module.assessment}</small>
                   <details className="module-explain">
