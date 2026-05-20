@@ -411,6 +411,7 @@ def regulation_mapper_agent(risks: list[dict[str, Any]]) -> list[dict[str, Any]]
                 "humanReview": "needs-review" if item["level"] in ["Critical", "High"] else "accepted",
             }
         )
+    rows.sort(key=lambda r: r.get("confidence", 0), reverse=True)
     return rows
 
 

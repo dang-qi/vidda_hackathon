@@ -9,7 +9,8 @@ const LAST_RUN_KEY = "vidda.lastCompletedRunId";
 const reviewOptions = [
   { value: "needs-review", label: "Needs review" },
   { value: "accepted", label: "Accepted" },
-  { value: "edited", label: "Edited by human" },
+  { value: "edited", label: "Edit direct" },
+  { value: "edit-ai", label: "Edit by asking AI" },
   { value: "rejected", label: "Rejected" },
 ];
 
@@ -65,11 +66,30 @@ const COUNTRIES = [
   },
 ];
 
+const roleDemoPrompts = [
+  {
+    label: "Second-line oversight",
+    instruction:
+      "Change this role into a second-line oversight role. It does not directly onboard customers. It reviews samples of first-line files, challenges weak CDD/EDD decisions, monitors policy adherence, and reports recurring control issues to Compliance leadership.",
+  },
+  {
+    label: "Branch manager",
+    instruction:
+      "Make this role a retail Branch Manager. The role supervises customer advisors, checks that onboarding documents are complete, approves routine escalations, coaches staff on fraud and AML red flags, and escalates high-risk customers to Compliance or the MLRO.",
+  },
+  {
+    label: "Remove final decision",
+    instruction:
+      "Clarify that this role performs initial screening and documentation only. It cannot make final sanctions, PEP, SAR, or high-risk customer approval decisions. Those decisions must be escalated to Compliance.",
+  },
+];
+
 function App() {
   const [roles, setRoles] = useState([]);
   const [selectedRole, setSelectedRole] = useState("kyc-analyst");
   const [selectedCountry, setSelectedCountry] = useState("SE");
   const [roleForm, setRoleForm] = useState(emptyRoleForm);
+  const [workflow, setWorkflow] = useState(null);
   const [analysis, setAnalysis] = useState(null);
   const [cachedAnalyses, setCachedAnalyses] = useState({});
   const [prefetchStatus, setPrefetchStatus] = useState({});
@@ -78,6 +98,7 @@ function App() {
   const [compareLoading, setCompareLoading] = useState(false);
   const [activeStep, setActiveStep] = useState("role");
   const [isLoading, setIsLoading] = useState(false);
+  const [loadingMessage, setLoadingMessage] = useState(null);
   const [error, setError] = useState("");
   const [job, setJob] = useState(null);
   const [historyRuns, setHistoryRuns] = useState([]);
@@ -236,11 +257,15 @@ function App() {
 
   async function runAnalysis() {
     const rolePayload = buildCustomRolePayload(roleForm);
-    if (!rolePayload.name || rolePayload.description.length < 20) {
-      setError("Enter a role title and enough role detail before running the workflow.");
+    if (!rolePayload.name) {
+      setError("Enter a role title or choose a template before creating a role draft.");
       return;
     }
     setIsLoading(true);
+    setLoadingMessage({
+      title: "Role Parser Agent is drafting the role profile.",
+      body: "It reads the selected template or role name, infers likely responsibilities, identifies missing information, and prepares questions for human confirmation.",
+    });
     setError("");
     setAnalysis(null);
     setCachedAnalyses({});
@@ -250,20 +275,216 @@ function App() {
     setJob(null);
     setNowMs(Date.now());
     try {
-      const response = await fetch(`${API_BASE}/api/analyze/start`, {
+      const response = await fetch(`${API_BASE}/api/workflows`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(buildAnalysisBody(selectedCountry)),
+        body: JSON.stringify({
+          roleId: selectedRole,
+          customRole: rolePayload,
+          regulatoryScope: {
+            jurisdiction: "EU",
+            regulation: "AMLR 2024/1624",
+            articles: ["9", "10", "11", "12", "13", "14"],
+            country: selectedCountry,
+          },
+        }),
       });
       if (!response.ok) {
-        throw new Error("analysis failed");
+        throw new Error("role draft failed");
       }
       const data = await response.json();
-      safeStorageSet(ACTIVE_JOB_KEY, data.jobId);
-      setJob(data);
+      setWorkflow(data);
+      setRoleForm(roleDraftToForm(data.roleDraft));
     } catch (err) {
-      setError("Could not generate the workflow. Check that the backend is running.");
+      setError("Could not create the role draft. Check that the backend is running.");
+    } finally {
       setIsLoading(false);
+      setLoadingMessage(null);
+    }
+  }
+
+  async function reviseRoleDraft(instruction) {
+    if (!workflow?.workflowId || !instruction.trim()) return;
+    setIsLoading(true);
+    setLoadingMessage({
+      title: "Role Parser Agent is applying your natural-language change.",
+      body: "It updates the structured responsibilities, risk clues, decision authority, and follow-up questions while keeping the draft ready for human confirmation.",
+    });
+    setError("");
+    try {
+      const data = await postJson(`/api/workflows/${workflow.workflowId}/role/revise`, { instruction });
+      setWorkflow(data);
+      setRoleForm(roleDraftToForm(data.roleDraft));
+    } catch {
+      setError("Could not revise the role draft.");
+    } finally {
+      setIsLoading(false);
+      setLoadingMessage(null);
+    }
+  }
+
+  async function confirmRoleAndGenerateMatrix() {
+    if (!workflow?.workflowId) return;
+    setIsLoading(true);
+    setLoadingMessage({
+      title: "Risk and regulation agents are mapping the confirmed role.",
+      body: "They convert the confirmed role profile into risk evidence, AMLR article traces, competency needs, and rows that all start in human review.",
+    });
+    setError("");
+    try {
+      await postJson(`/api/workflows/${workflow.workflowId}/role/approve`, { roleDraft: workflow.roleDraft });
+      const data = await postJson(`/api/workflows/${workflow.workflowId}/matrix/generate`, {});
+      setWorkflow(data);
+      setActiveStep("matrix");
+    } catch {
+      setError("Could not confirm the role and generate the matrix.");
+    } finally {
+      setIsLoading(false);
+      setLoadingMessage(null);
+    }
+  }
+
+  async function reviseMatrix(instruction, targetId) {
+    if (!workflow?.workflowId || !instruction.trim()) return;
+    setIsLoading(true);
+    setLoadingMessage({
+      title: "Matrix revision agent is applying your instruction.",
+      body: "It revises the selected row or whole matrix from your natural-language guidance and marks changed evidence for reviewer confirmation.",
+    });
+    setError("");
+    try {
+      const data = await postJson(`/api/workflows/${workflow.workflowId}/matrix/revise`, { instruction, targetId });
+      setWorkflow(data);
+    } catch {
+      setError("Could not revise the matrix.");
+    } finally {
+      setIsLoading(false);
+      setLoadingMessage(null);
+    }
+  }
+
+  async function directUpdateMatrixRow(updatedRow) {
+    if (!updatedRow?.id) return;
+    const rowForSave = { ...updatedRow, humanReview: "edited" };
+    if (!analysis && workflow?.workflowId) {
+      setWorkflow((current) => ({
+        ...current,
+        riskRegulationMatrix: current.riskRegulationMatrix.map((row) =>
+          row.id === rowForSave.id ? rowForSave : row,
+        ),
+      }));
+      try {
+        const data = await postJson(`/api/workflows/${workflow.workflowId}/matrix/row`, { row: rowForSave });
+        setWorkflow(data);
+      } catch {
+        setError("Matrix row was edited locally, but the staged workflow could not be saved.");
+      }
+      return;
+    }
+    if (!analysis) return;
+    const beforeRow = analysis.riskRegulationMatrix.find((row) => row.id === rowForSave.id);
+    setAnalysis((current) => ({
+      ...current,
+      riskRegulationMatrix: current.riskRegulationMatrix.map((row) =>
+        row.id === rowForSave.id ? rowForSave : row,
+      ),
+    }));
+    if (analysis.workflowId && beforeRow) {
+      try {
+        await recordReviewAction({
+          artifactType: "matrix",
+          targetId: rowForSave.id,
+          action: "edited",
+          before: beforeRow,
+          after: rowForSave,
+          comment: "Matrix row edited directly",
+        });
+      } catch {
+        setError("Matrix row was edited locally, but the audit trail could not be saved.");
+      }
+    }
+  }
+
+  async function acceptAllMatrixRows() {
+    if (!analysis && workflow?.workflowId) {
+      setWorkflow((current) => ({
+        ...current,
+        riskRegulationMatrix: current.riskRegulationMatrix.map((row) => ({ ...row, humanReview: "accepted" })),
+      }));
+      try {
+        const data = await postJson(`/api/workflows/${workflow.workflowId}/matrix/accept-all`, {});
+        setWorkflow(data);
+      } catch {
+        setError("Rows were accepted locally, but the staged workflow could not be saved.");
+      }
+      return;
+    }
+    if (!analysis) return;
+    const beforeRows = analysis.riskRegulationMatrix;
+    const afterRows = beforeRows.map((row) => ({ ...row, humanReview: "accepted" }));
+    setAnalysis((current) => ({ ...current, riskRegulationMatrix: afterRows }));
+    if (analysis.workflowId) {
+      try {
+        await Promise.all(afterRows.map((row, index) => recordReviewAction({
+          artifactType: "matrix",
+          targetId: row.id,
+          action: "accepted",
+          before: beforeRows[index],
+          after: row,
+          comment: "Matrix row accepted via Accept all",
+        })));
+      } catch {
+        setError("Rows were accepted locally, but the audit trail could not be fully saved.");
+      }
+    }
+  }
+
+  async function approveMatrixAndGenerateTraining() {
+    if (!workflow?.workflowId) return;
+    setIsLoading(true);
+    setLoadingMessage({
+      title: "Training Designer and Quality Reviewer agents are running.",
+      body: "They use the confirmed matrix to generate the training path, LMS-ready assignments, quality review, and audit evidence pack.",
+    });
+    setError("");
+    try {
+      await postJson(`/api/workflows/${workflow.workflowId}/matrix/approve`, {});
+      const data = await postJson(`/api/workflows/${workflow.workflowId}/training/generate`, {});
+      setWorkflow(data);
+      if (data.result) {
+        safeStorageSet(LAST_RUN_KEY, data.result.workflowId);
+        setAnalysis(data.result);
+        setActiveStep("training");
+        loadHistory();
+      }
+    } catch {
+      setError("Could not confirm the matrix and generate the training path.");
+    } finally {
+      setIsLoading(false);
+      setLoadingMessage(null);
+    }
+  }
+
+  async function reviseTrainingPlan(instruction) {
+    if (!workflow?.workflowId || !instruction.trim()) return;
+    setIsLoading(true);
+    setLoadingMessage({
+      title: "Training Designer Agent is revising the training path.",
+      body: "It applies your natural-language instruction to modules, rationale, assessments, and LMS assignment status while keeping the plan traceable to the matrix.",
+    });
+    setError("");
+    try {
+      const data = await postJson(`/api/workflows/${workflow.workflowId}/training/revise`, { instruction });
+      setWorkflow(data);
+      if (data.result) {
+        setAnalysis(data.result);
+        loadHistory();
+      }
+    } catch {
+      setError("Could not revise the training path.");
+    } finally {
+      setIsLoading(false);
+      setLoadingMessage(null);
     }
   }
 
@@ -435,9 +656,28 @@ function App() {
   }
 
   async function updateReview(rowId, status) {
-    if (!analysis) {
+    if (!analysis && !workflow) {
       return;
     }
+    if (!analysis && workflow?.workflowId) {
+      setWorkflow((current) => ({
+        ...current,
+        riskRegulationMatrix: current.riskRegulationMatrix.map((row) =>
+          row.id === rowId ? { ...row, humanReview: status } : row,
+        ),
+      }));
+      try {
+        const data = await postJson(`/api/workflows/${workflow.workflowId}/matrix/status`, {
+          targetId: rowId,
+          status,
+        });
+        setWorkflow(data);
+      } catch {
+        setError("Review was updated locally, but the staged workflow could not be saved.");
+      }
+      return;
+    }
+
     const beforeRow = analysis.riskRegulationMatrix.find((row) => row.id === rowId);
     const afterRow = beforeRow ? { ...beforeRow, humanReview: status } : null;
 
@@ -538,9 +778,14 @@ function App() {
     }
   }
 
-  const approvedCount = analysis?.riskRegulationMatrix.filter((row) =>
-    ["accepted", "edited"].includes(row.humanReview),
-  ).length ?? 0;
+  const workingAnalysis = analysis ?? workflowToAnalysis(workflow);
+  const currentMatrix = workingAnalysis?.riskRegulationMatrix ?? [];
+  const approvedCount = currentMatrix.filter((row) =>
+    ["accepted", "edited", "rejected"].includes(row.humanReview),
+  ).length;
+  const roleConfirmed = ["role_confirmed", "matrix_review", "matrix_confirmed", "complete"].includes(workflow?.status);
+  const matrixReady = currentMatrix.length > 0;
+  const trainingReady = Boolean(analysis?.trainingPlan);
 
   return (
     <main className="app-shell">
@@ -551,9 +796,9 @@ function App() {
         </a>
         <nav className="topnav" aria-label="Workflow sections">
           <button onClick={() => setActiveStep("role")}>Role</button>
-          <button onClick={() => setActiveStep("matrix")} disabled={!analysis}>Matrix</button>
-          <button onClick={() => setActiveStep("training")} disabled={!analysis}>Training</button>
-          <button onClick={() => setActiveStep("audit")} disabled={!analysis}>Audit</button>
+          <button onClick={() => setActiveStep("matrix")} disabled={!matrixReady}>Matrix</button>
+          <button onClick={() => setActiveStep("training")} disabled={!trainingReady}>Training</button>
+          <button onClick={() => setActiveStep("audit")} disabled={!trainingReady}>Audit</button>
           <button onClick={() => setActiveStep("history")}>History</button>
         </nav>
       </header>
@@ -574,11 +819,11 @@ function App() {
           </div>
           <div className="signal-row">
             <span>Human checkpoints</span>
-            <strong>{analysis ? `${approvedCount}/${analysis.riskRegulationMatrix.length}` : "ready"}</strong>
+            <strong>{matrixReady ? `${approvedCount}/${currentMatrix.length}` : roleConfirmed ? "role confirmed" : "role draft"}</strong>
           </div>
           <div className="signal-row">
             <span>Audit readiness</span>
-            <strong>{analysis ? `${analysis.qualityReview.overallScore}%` : "pending"}</strong>
+            <strong>{analysis ? `${analysis.qualityReview.overallScore}%` : workflow?.status ?? "pending"}</strong>
           </div>
         </div>
       </section>
@@ -589,9 +834,9 @@ function App() {
         <aside className="sidebar">
           <p className="section-kicker">Workflow</p>
           <StepButton id="role" activeStep={activeStep} setActiveStep={setActiveStep} index="01" label="Enter role information" />
-          <StepButton id="matrix" activeStep={activeStep} setActiveStep={setActiveStep} index="02" label="Risk-regulation matrix" disabled={!analysis} />
-          <StepButton id="training" activeStep={activeStep} setActiveStep={setActiveStep} index="03" label="Training path" disabled={!analysis} />
-          <StepButton id="audit" activeStep={activeStep} setActiveStep={setActiveStep} index="04" label="Audit & quality" disabled={!analysis} />
+          <StepButton id="matrix" activeStep={activeStep} setActiveStep={setActiveStep} index="02" label="Risk-regulation matrix" disabled={!matrixReady} />
+          <StepButton id="training" activeStep={activeStep} setActiveStep={setActiveStep} index="03" label="Training path" disabled={!trainingReady} />
+          <StepButton id="audit" activeStep={activeStep} setActiveStep={setActiveStep} index="04" label="Audit & quality" disabled={!trainingReady} />
           <StepButton id="history" activeStep={activeStep} setActiveStep={setActiveStep} index="05" label="History & approvals" />
         </aside>
 
@@ -603,24 +848,37 @@ function App() {
               onPresetSelect={(role) => {
                 setSelectedRole(role.id);
                 setRoleForm(roleToForm(role));
+                setWorkflow(null);
+                setAnalysis(null);
               }}
               roleForm={roleForm}
               setRoleForm={setRoleForm}
+              workflow={workflow}
+              reviseRoleDraft={reviseRoleDraft}
+              confirmRoleAndGenerateMatrix={confirmRoleAndGenerateMatrix}
               runAnalysis={runAnalysis}
               isLoading={isLoading}
+              loadingMessage={loadingMessage}
               job={job}
               nowMs={nowMs}
               selectedCountry={selectedCountry}
               setSelectedCountry={setSelectedCountry}
             />
           )}
-          {activeStep === "matrix" && analysis && (
+          {activeStep === "matrix" && workingAnalysis && (
             <MatrixView
-              analysis={analysis}
+              analysis={workingAnalysis}
+              workflowStatus={workflow?.status}
               updateReview={updateReview}
+              reviseMatrix={reviseMatrix}
+              directUpdateMatrixRow={directUpdateMatrixRow}
+              acceptAllMatrixRows={acceptAllMatrixRows}
+              approveMatrixAndGenerateTraining={approveMatrixAndGenerateTraining}
+              isLoading={isLoading}
+              loadingMessage={loadingMessage}
+              canGenerateTraining={Boolean(workflow?.workflowId) && !analysis}
               selectedCountry={selectedCountry}
               switchCountry={switchCountry}
-              isLoading={isLoading}
               job={job}
               nowMs={nowMs}
               prefetchStatus={prefetchStatus}
@@ -635,14 +893,19 @@ function App() {
             />
           )}
           {activeStep === "training" && analysis && (
-            <TrainingView analysis={analysis} />
+            <TrainingView
+              analysis={analysis}
+              reviseTrainingPlan={reviseTrainingPlan}
+              approveTrainingForLms={approveTrainingForLms}
+              requestTrainingChanges={requestTrainingChanges}
+              isLoading={isLoading}
+              loadingMessage={loadingMessage}
+            />
           )}
           {activeStep === "audit" && analysis && (
             <AuditView
               analysis={analysis}
               approvedCount={approvedCount}
-              approveTrainingForLms={approveTrainingForLms}
-              requestTrainingChanges={requestTrainingChanges}
               downloadAuditPack={downloadAuditPack}
             />
           )}
@@ -680,14 +943,20 @@ function RoleIntake({
   onPresetSelect,
   roleForm,
   setRoleForm,
+  workflow,
+  reviseRoleDraft,
+  confirmRoleAndGenerateMatrix,
   runAnalysis,
   isLoading,
+  loadingMessage,
   job,
   nowMs,
   selectedCountry,
   setSelectedCountry,
 }) {
   const activeCountry = COUNTRIES.find((c) => c.code === selectedCountry) ?? COUNTRIES[0];
+  const [roleInstruction, setRoleInstruction] = useState("");
+
   function updateField(field, value) {
     setRoleForm((current) => ({ ...current, [field]: value }));
   }
@@ -837,9 +1106,70 @@ function RoleIntake({
         </div>
       </div>
 
-      <button className="primary-action" onClick={runAnalysis} disabled={isLoading || !roleForm.name || !roleForm.responsibilities}>
-        {isLoading ? "Running agents..." : "Run multi-agent workflow"}
-      </button>
+      <div className="draft-action-row">
+        <button className="primary-action" onClick={runAnalysis} disabled={isLoading || !roleForm.name}>
+          {isLoading ? "Working..." : "Create role draft"}
+        </button>
+        {isLoading && loadingMessage && <WorkingNote message={loadingMessage} />}
+      </div>
+
+      {workflow?.roleDraft && (
+        <section className="review-workspace" aria-label="Role draft review">
+          <div className="review-main">
+            <div className="section-heading compact">
+              <p className="section-kicker">Human checkpoint 01</p>
+              <h3>Confirm role draft</h3>
+            </div>
+            <ParsedRoleOutput data={workflow.roleDraft} />
+            {workflow.roleDraft.clarifyingQuestions?.length > 0 && (
+              <div className="question-list">
+                <strong>Clarifying questions</strong>
+                {workflow.roleDraft.clarifyingQuestions.map((question) => (
+                  <span key={question}>{question}</span>
+                ))}
+              </div>
+            )}
+          </div>
+          <div className="conversation-panel">
+            <p className="section-kicker">Natural-language edit</p>
+            <div className="prompt-chip-grid" aria-label="Role demo prompts">
+              {roleDemoPrompts.map((prompt) => (
+                <button
+                  type="button"
+                  className="prompt-chip"
+                  key={prompt.label}
+                  onClick={() => setRoleInstruction(prompt.instruction)}
+                >
+                  {prompt.label}
+                </button>
+              ))}
+            </div>
+            <textarea
+              value={roleInstruction}
+              onChange={(event) => setRoleInstruction(event.target.value)}
+              rows="7"
+              placeholder="Tell the agent what to change or answer its questions. Example: This role is second line, reviews samples, and does not directly onboard customers."
+            />
+            <div className="action-row">
+              <button
+                className="secondary-action"
+                onClick={async () => {
+                  await reviseRoleDraft(roleInstruction);
+                  setRoleInstruction("");
+                }}
+                disabled={isLoading || !roleInstruction.trim()}
+              >
+                Apply changes
+              </button>
+              <button className="primary-action compact-action" onClick={confirmRoleAndGenerateMatrix} disabled={isLoading}>
+                Confirm role and map risks
+              </button>
+            </div>
+            {isLoading && loadingMessage && <WorkingNote message={loadingMessage} />}
+            {workflow.changeSummary?.length > 0 && <ChangeSummary items={workflow.changeSummary} />}
+          </div>
+        </section>
+      )}
 
       {job && <AgentProgress job={job} nowMs={nowMs} />}
     </div>
@@ -1180,6 +1510,18 @@ function safeStorageRemove(key) {
   }
 }
 
+async function postJson(path, body) {
+  const response = await fetch(`${API_BASE}${path}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (!response.ok) {
+    throw new Error(`${path} failed`);
+  }
+  return response.json();
+}
+
 function roleToForm(role) {
   return {
     name: role.name ?? "",
@@ -1189,6 +1531,22 @@ function roleToForm(role) {
     responsibilities: (role.tasks ?? []).join("\n"),
     riskSignals: (role.riskSignals ?? []).join("\n"),
     additionalContext: role.description ?? "",
+  };
+}
+
+function roleDraftToForm(draft) {
+  if (!draft) return emptyRoleForm;
+  return {
+    name: draft.name ?? "",
+    team: draft.team ?? "",
+    function: draft.function ?? "",
+    lineOfDefence: draft.lineOfDefence ?? "",
+    responsibilities: (draft.responsibilities ?? []).map((item) => item.text ?? item).join("\n"),
+    riskSignals: (draft.riskClues ?? []).join("\n"),
+    additionalContext: [
+      draft.decisionAuthority ? `Decision authority: ${draft.decisionAuthority}` : "",
+      draft.sourceQuality ? `Source quality: ${draft.sourceQuality}` : "",
+    ].filter(Boolean).join("\n"),
   };
 }
 
@@ -1247,6 +1605,41 @@ function parseRoleFile(text, fileName) {
   };
 }
 
+function workflowToAnalysis(workflow) {
+  if (!workflow?.riskRegulationMatrix?.length) return null;
+  return {
+    workflowId: workflow.workflowId,
+    role: workflow.role,
+    agents: workflow.agents ?? [],
+    parsedRole: workflow.roleDraft,
+    riskRegulationMatrix: workflow.riskRegulationMatrix ?? [],
+    sourcePack: loadedSources,
+    changeSummary: workflow.changeSummary ?? [],
+  };
+}
+
+function ChangeSummary({ items }) {
+  if (!items?.length) return null;
+  return (
+    <div className="change-summary">
+      <strong>Latest changes</strong>
+      {items.map((item) => (
+        <span key={item}>{item}</span>
+      ))}
+    </div>
+  );
+}
+
+function WorkingNote({ message }) {
+  if (!message) return null;
+  return (
+    <div className="working-note" role="status">
+      <strong>{message.title}</strong>
+      <span>{message.body}</span>
+    </div>
+  );
+}
+
 function SourcesLoaded({ sources }) {
   return (
     <section className="sources-panel" aria-label="Loaded challenge sources">
@@ -1291,10 +1684,17 @@ function markTrainingPlan(trainingPlan, status) {
 
 function MatrixView({
   analysis,
+  workflowStatus,
   updateReview,
+  reviseMatrix,
+  directUpdateMatrixRow,
+  acceptAllMatrixRows,
+  approveMatrixAndGenerateTraining,
+  isLoading,
+  loadingMessage,
+  canGenerateTraining,
   selectedCountry,
   switchCountry,
-  isLoading,
   job,
   nowMs,
   prefetchStatus,
@@ -1304,6 +1704,10 @@ function MatrixView({
   runComparisonAnalysis,
   clearComparison,
 }) {
+  const [matrixInstruction, setMatrixInstruction] = useState("");
+  const [targetRowId, setTargetRowId] = useState("");
+  const [editingRow, setEditingRow] = useState(null);
+
   const overlay = analysis.countryOverlay;
   const compareOverlay = compareAnalysis?.countryOverlay;
   const activeCountryCode = selectedCountry || overlay?.code;
@@ -1312,6 +1716,22 @@ function MatrixView({
     isLoading && selectedCountry && overlay && selectedCountry !== overlay.code
       ? COUNTRIES.find((c) => c.code === selectedCountry)
       : null;
+
+  function handleReviewAction(row, value) {
+    if (value === "edited") {
+      setEditingRow(row);
+      return;
+    }
+    if (value === "edit-ai") {
+      setTargetRowId(row.id);
+      setMatrixInstruction(`Revise this row: ${row.riskScenario}. `);
+      window.setTimeout(() => {
+        document.getElementById("matrix-ai-editor")?.scrollIntoView({ behavior: "smooth", block: "start" });
+      }, 50);
+      return;
+    }
+    updateReview(row.id, value);
+  }
 
   return (
     <div className="panel-section">
@@ -1423,7 +1843,7 @@ function MatrixView({
                 ))}
               </div>
               <div>
-                <select value={row.humanReview} onChange={(event) => updateReview(row.id, event.target.value)}>
+                <select value={row.humanReview} onChange={(event) => handleReviewAction(row, event.target.value)}>
                   {reviewOptions.map((option) => (
                     <option value={option.value} key={option.value}>
                       {option.label}
@@ -1434,6 +1854,69 @@ function MatrixView({
             </div>
           ))}
         </div>
+      )}
+
+      {canGenerateTraining && (
+        <section id="matrix-ai-editor" className="review-workspace matrix-review is-bottom" aria-label="Matrix review workspace">
+          <div>
+            <p className="section-kicker">Human checkpoint 02</p>
+            <h3>Confirm risk evidence before training design</h3>
+            <p className="muted-copy">
+              Review the rows first, then accept all, edit one row directly, or ask AI to revise selected evidence before the training agent runs.
+            </p>
+          </div>
+          <div className="conversation-panel">
+            <select value={targetRowId} onChange={(event) => setTargetRowId(event.target.value)}>
+              <option value="">Apply to whole matrix</option>
+              {analysis.riskRegulationMatrix.map((row) => (
+                <option value={row.id} key={row.id}>
+                  {row.id}: {row.riskScenario}
+                </option>
+              ))}
+            </select>
+            <textarea
+              value={matrixInstruction}
+              onChange={(event) => setMatrixInstruction(event.target.value)}
+              rows="5"
+              placeholder="Example: The sanctions row should be medium risk because this role only performs initial screening and escalates final decisions."
+            />
+            <div className="action-row">
+              <button className="secondary-action" onClick={acceptAllMatrixRows} disabled={isLoading}>
+                Accept all
+              </button>
+              <button
+                className="secondary-action"
+                onClick={async () => {
+                  await reviseMatrix(matrixInstruction, targetRowId || null);
+                  setMatrixInstruction("");
+                }}
+                disabled={isLoading || !matrixInstruction.trim()}
+              >
+                Apply AI changes
+              </button>
+              <button
+                className="primary-action compact-action"
+                onClick={approveMatrixAndGenerateTraining}
+                disabled={isLoading || workflowStatus === "complete"}
+              >
+                Confirm matrix and generate training
+              </button>
+            </div>
+            {isLoading && loadingMessage && <WorkingNote message={loadingMessage} />}
+            {analysis.changeSummary?.length > 0 && <ChangeSummary items={analysis.changeSummary} />}
+          </div>
+        </section>
+      )}
+
+      {editingRow && (
+        <MatrixEditModal
+          row={editingRow}
+          onClose={() => setEditingRow(null)}
+          onSave={async (updatedRow) => {
+            await directUpdateMatrixRow(updatedRow);
+            setEditingRow(null);
+          }}
+        />
       )}
     </div>
   );
@@ -1579,6 +2062,106 @@ function CompareMatrix({ baseAnalysis, baseOverlay, compareAnalysis, compareOver
   );
 }
 
+function MatrixEditModal({ row, onClose, onSave }) {
+  const [draft, setDraft] = useState({
+    ...row,
+    confidence: row.confidence ?? 75,
+  });
+
+  function updateField(field, value) {
+    setDraft((current) => ({ ...current, [field]: value }));
+  }
+
+  return (
+    <div className="modal-backdrop" role="presentation">
+      <section className="matrix-edit-modal" role="dialog" aria-modal="true" aria-label="Edit matrix row directly">
+        <div className="modal-heading">
+          <div>
+            <p className="section-kicker">Edit direct</p>
+            <h3>{row.id}: Matrix row</h3>
+          </div>
+          <button className="small-action" onClick={onClose}>Close</button>
+        </div>
+
+        <div className="modal-form-grid">
+          <label>
+            <span>Risk scenario</span>
+            <textarea
+              value={draft.riskScenario}
+              onChange={(event) => updateField("riskScenario", event.target.value)}
+              rows="3"
+            />
+          </label>
+          <label>
+            <span>Role evidence</span>
+            <textarea
+              value={draft.roleEvidence}
+              onChange={(event) => updateField("roleEvidence", event.target.value)}
+              rows="3"
+            />
+          </label>
+          <label>
+            <span>Risk theme</span>
+            <select value={draft.riskTheme} onChange={(event) => updateField("riskTheme", event.target.value)}>
+              {["AML", "Sanctions", "Fraud", "Documentation", "Governance"].map((theme) => (
+                <option key={theme} value={theme}>{theme}</option>
+              ))}
+            </select>
+          </label>
+          <label>
+            <span>Risk level</span>
+            <select value={draft.riskLevel} onChange={(event) => updateField("riskLevel", event.target.value)}>
+              {["Low", "Medium", "High", "Critical"].map((level) => (
+                <option key={level} value={level}>{level}</option>
+              ))}
+            </select>
+          </label>
+          <label>
+            <span>Evidence strength</span>
+            <input
+              type="number"
+              min="0"
+              max="100"
+              value={draft.confidence}
+              onChange={(event) => updateField("confidence", Number(event.target.value))}
+            />
+          </label>
+          <label>
+            <span>Training depth</span>
+            <input
+              value={draft.trainingDepth}
+              onChange={(event) => updateField("trainingDepth", event.target.value)}
+            />
+          </label>
+          <label className="wide-field">
+            <span>Why it matters</span>
+            <textarea
+              value={draft.whyItMatters}
+              onChange={(event) => updateField("whyItMatters", event.target.value)}
+              rows="3"
+            />
+          </label>
+          <label className="wide-field">
+            <span>Competency need</span>
+            <textarea
+              value={draft.competencyNeed}
+              onChange={(event) => updateField("competencyNeed", event.target.value)}
+              rows="3"
+            />
+          </label>
+        </div>
+
+        <div className="modal-actions">
+          <button className="secondary-action" onClick={onClose}>Cancel</button>
+          <button className="primary-action compact-action" onClick={() => onSave({ ...draft, humanReview: "edited" })}>
+            Save direct edit
+          </button>
+        </div>
+      </section>
+    </div>
+  );
+}
+
 function CompareCell({ row, overlay }) {
   if (!row || !overlay) {
     return <div className="compare-cell empty">No matching row</div>;
@@ -1613,10 +2196,21 @@ function whyCountriesDiffer(baseRow, compareRow, baseOverlay, compareOverlay) {
   return `${baseOverlay.name} requires ${baseReview.toLowerCase()} (${baseLaws}); ${compareOverlay.name} requires ${compareReview.toLowerCase()} (${compareLaws}).`;
 }
 
-function TrainingView({ analysis }) {
+function TrainingView({
+  analysis,
+  reviseTrainingPlan,
+  approveTrainingForLms,
+  requestTrainingChanges,
+  isLoading,
+  loadingMessage,
+}) {
+  const [trainingInstruction, setTrainingInstruction] = useState("");
   const allModules = analysis.trainingPlan.quarters.flatMap((quarter) => quarter.modules);
   const overlay = analysis.countryOverlay;
   const mandatoryCount = allModules.filter((module) => module.countryMandatory).length;
+  const trainingApproved = analysis.trainingPlan.lmsAssignments.some(
+    (assignment) => assignment.approvalStatus === "approved_for_lms",
+  );
   return (
     <div className="panel-section">
       <div className="section-heading">
@@ -1717,6 +2311,43 @@ function TrainingView({ analysis }) {
           ))}
         </div>
       </section>
+
+      <section className="review-workspace matrix-review is-bottom" aria-label="Training review workspace">
+        <div>
+          <p className="section-kicker">Human checkpoint 03</p>
+          <h3>Confirm training path before LMS approval</h3>
+          <p className="muted-copy">
+            Review modules, assessments and LMS assignment first. Then ask AI to adjust the training path or approve it for LMS rollout.
+          </p>
+        </div>
+        <div className="conversation-panel">
+          <textarea
+            value={trainingInstruction}
+            onChange={(event) => setTrainingInstruction(event.target.value)}
+            rows="5"
+            placeholder="Example: Add more scenario-based assessment for high-risk onboarding and reduce generic AML awareness modules."
+          />
+          <div className="action-row">
+            <button
+              className="secondary-action"
+              onClick={async () => {
+                await reviseTrainingPlan(trainingInstruction);
+                setTrainingInstruction("");
+              }}
+              disabled={isLoading || !trainingInstruction.trim()}
+            >
+              Apply AI training changes
+            </button>
+            <button className="secondary-action" onClick={requestTrainingChanges} disabled={isLoading}>
+              Request training changes
+            </button>
+            <button className="primary-action compact-action" onClick={approveTrainingForLms} disabled={isLoading || trainingApproved}>
+              {trainingApproved ? "Training approved for LMS" : "Approve training for LMS"}
+            </button>
+          </div>
+          {isLoading && loadingMessage && <WorkingNote message={loadingMessage} />}
+        </div>
+      </section>
     </div>
   );
 }
@@ -1724,11 +2355,11 @@ function TrainingView({ analysis }) {
 function AuditView({
   analysis,
   approvedCount,
-  approveTrainingForLms,
-  requestTrainingChanges,
   downloadAuditPack,
 }) {
   const matrixApproved = approvedCount === analysis.riskRegulationMatrix.length;
+  const matrixHasRejected = analysis.riskRegulationMatrix.some((row) => row.humanReview === "rejected");
+  const roleApproved = analysis.parsedRole?.approvalStatus === "confirmed" || analysis.executionMode === "staged-human-review";
   const trainingApproved = analysis.trainingPlan.lmsAssignments.some(
     (assignment) => assignment.approvalStatus === "approved_for_lms",
   );
@@ -1764,13 +2395,13 @@ function AuditView({
             <span>01</span>
             <strong>Role source confirmed</strong>
             <small>{analysis.parsedRole.sourceQuality}</small>
-            <StatusBadge value={analysis.role.id === "custom-role" ? "in_review" : "matrix_approved"} />
+            <StatusBadge value={roleApproved ? "role_confirmed" : "in_review"} />
           </div>
           <div className="checkpoint-item">
             <span>02</span>
             <strong>Risk-regulation matrix</strong>
-            <small>{approvedCount}/{analysis.riskRegulationMatrix.length} mappings accepted or edited</small>
-            <StatusBadge value={matrixApproved ? "matrix_approved" : "needs_review"} />
+            <small>{approvedCount}/{analysis.riskRegulationMatrix.length} mappings reviewed</small>
+            <StatusBadge value={matrixApproved ? matrixHasRejected ? "changes_requested" : "matrix_approved" : "needs_review"} />
           </div>
           <div className="checkpoint-item">
             <span>03</span>
@@ -1778,14 +2409,6 @@ function AuditView({
             <small>{countTrainingModules(analysis.trainingPlan.quarters)} modules ready for LMS review</small>
             <StatusBadge value={trainingApproved ? "approved_for_lms" : "needs_review"} />
           </div>
-        </div>
-        <div className="checkpoint-actions">
-          <button className="secondary-action" onClick={approveTrainingForLms} disabled={!matrixApproved}>
-            Approve training for LMS
-          </button>
-          <button className="secondary-action" onClick={requestTrainingChanges}>
-            Request training changes
-          </button>
         </div>
       </section>
 
@@ -1802,7 +2425,7 @@ function AuditView({
               <dd>{analysis.auditPack.amlrCoverage.join(", ")}</dd>
             </div>
             <div>
-              <dt>Human approvals</dt>
+              <dt>Human reviews</dt>
               <dd>{approvedCount}/{analysis.riskRegulationMatrix.length}</dd>
             </div>
             <div>
@@ -1982,6 +2605,7 @@ function statusLabel(value) {
   const labels = {
     needs_review: "Needs review",
     in_review: "In review",
+    role_confirmed: "Role confirmed",
     matrix_approved: "Matrix approved",
     approved_for_lms: "Approved for LMS",
     changes_requested: "Changes requested",
@@ -1993,6 +2617,7 @@ function normalizeApprovalStatus(value) {
   if (value === "approved_for_lms") return "approved_for_lms";
   if (value === "changes_requested") return "changes_requested";
   if (value === "matrix_approved") return "matrix_approved";
+  if (value === "role_confirmed") return "role_confirmed";
   if (value === "in_review") return "in_review";
   return "needs_review";
 }
