@@ -800,6 +800,7 @@ function App() {
           <button onClick={() => setActiveStep("training")} disabled={!trainingReady}>Training</button>
           <button onClick={() => setActiveStep("audit")} disabled={!trainingReady}>Audit</button>
           <button onClick={() => setActiveStep("history")}>History</button>
+          <button onClick={() => setActiveStep("country-mapping")} disabled={!matrixReady}>Country</button>
         </nav>
       </header>
 
@@ -838,6 +839,7 @@ function App() {
           <StepButton id="training" activeStep={activeStep} setActiveStep={setActiveStep} index="03" label="Training path" disabled={!trainingReady} />
           <StepButton id="audit" activeStep={activeStep} setActiveStep={setActiveStep} index="04" label="Audit & quality" disabled={!trainingReady} />
           <StepButton id="history" activeStep={activeStep} setActiveStep={setActiveStep} index="05" label="History & approvals" />
+          <StepButton id="country-mapping" activeStep={activeStep} setActiveStep={setActiveStep} index="06" label="Country regulation interpretation mapping" disabled={!matrixReady} />
         </aside>
 
         <div className="main-panel">
@@ -916,6 +918,23 @@ function App() {
               loadRun={loadRun}
               refreshHistory={loadHistory}
               downloadAuditPack={downloadAuditPack}
+            />
+          )}
+          {activeStep === "country-mapping" && workingAnalysis && (
+            <CountryInterpretationView
+              analysis={workingAnalysis}
+              selectedCountry={selectedCountry}
+              switchCountry={switchCountry}
+              isLoading={isLoading}
+              prefetchStatus={prefetchStatus}
+              compareCountry={compareCountry}
+              compareAnalysis={compareAnalysis}
+              compareLoading={compareLoading}
+              runComparisonAnalysis={runComparisonAnalysis}
+              clearComparison={() => {
+                setCompareCountry(null);
+                setCompareAnalysis(null);
+              }}
             />
           )}
         </div>
@@ -1693,29 +1712,10 @@ function MatrixView({
   isLoading,
   loadingMessage,
   canGenerateTraining,
-  selectedCountry,
-  switchCountry,
-  job,
-  nowMs,
-  prefetchStatus,
-  compareCountry,
-  compareAnalysis,
-  compareLoading,
-  runComparisonAnalysis,
-  clearComparison,
 }) {
   const [matrixInstruction, setMatrixInstruction] = useState("");
   const [targetRowId, setTargetRowId] = useState("");
   const [editingRow, setEditingRow] = useState(null);
-
-  const overlay = analysis.countryOverlay;
-  const compareOverlay = compareAnalysis?.countryOverlay;
-  const activeCountryCode = selectedCountry || overlay?.code;
-  const compareOptions = COUNTRIES.filter((c) => c.code !== activeCountryCode);
-  const switchTarget =
-    isLoading && selectedCountry && overlay && selectedCountry !== overlay.code
-      ? COUNTRIES.find((c) => c.code === selectedCountry)
-      : null;
 
   function handleReviewAction(row, value) {
     if (value === "edited") {
@@ -1744,15 +1744,6 @@ function MatrixView({
         </p>
       </div>
 
-      {switchTarget && (
-        <div className="switching-banner">
-          <span className="switching-spinner" aria-hidden="true" />
-          <strong>Re-running agents for {switchTarget.flag} {switchTarget.name}…</strong>
-          <small>The matrix below still shows the previous jurisdiction. It will swap in when the new run completes.</small>
-          {job && <AgentProgress job={job} nowMs={nowMs} />}
-        </div>
-      )}
-
       <div className="agent-strip">
         {analysis.agents.map((agent) => (
           <div key={agent.name} className="agent-pill">
@@ -1762,99 +1753,55 @@ function MatrixView({
         ))}
       </div>
 
-      {overlay && (
-        <CountryOverlayBanner
-          overlay={overlay}
-          activeCountryCode={activeCountryCode}
-          isLoading={isLoading}
-          onSwitch={switchCountry}
-          prefetchStatus={prefetchStatus}
-          compareOptions={compareOptions}
-          compareCountry={compareCountry}
-          compareAnalysis={compareAnalysis}
-          compareLoading={compareLoading}
-          onCompare={runComparisonAnalysis}
-          onClearCompare={clearComparison}
-        />
-      )}
-
-      {compareOverlay && compareAnalysis ? (
-        <CompareMatrix
-          baseAnalysis={analysis}
-          baseOverlay={overlay}
-          compareAnalysis={compareAnalysis}
-          compareOverlay={compareOverlay}
-        />
-      ) : (
-        <div className="matrix-table">
-          <div className="matrix-header">
-            <span>Risk</span>
-            <span>Role risk evidence</span>
-            <span>AMLR trace{overlay ? " + national" : ""}</span>
-            <span>Human review</span>
-          </div>
-          {analysis.riskRegulationMatrix.map((row) => (
-            <div key={row.id} className="matrix-row">
-              <div>
-                <strong>{row.riskScenario}</strong>
-                <div className="risk-meta">
-                  <span>Theme: {row.riskTheme}</span>
-                  <span>Level: {row.riskLevel}</span>
-                  <span>Evidence strength: {row.confidence}%</span>
-                </div>
-                {row.localRoleLabel && (
-                  <div className="local-role-label" title="Localised role label for this jurisdiction">
-                    {overlay?.flag} {row.localRoleLabel}
-                  </div>
-                )}
-              </div>
-              <div>
-                <p>{row.roleEvidence}</p>
-                <small>{row.competencyNeed}</small>
-              </div>
-              <div className="article-list">
-                {row.amlrArticles.map((article) => (
-                  <span
-                    key={article.article}
-                    className="article-badge"
-                    tabIndex="0"
-                    aria-label={`${article.article}: ${article.title}. ${article.rationale}`}
-                  >
-                    {article.article}
-                    <span className="article-tooltip" role="tooltip">
-                      <strong>{article.title}</strong>
-                      <small>{article.rationale}</small>
-                    </span>
-                  </span>
-                ))}
-                {(row.nationalCitations ?? []).map((cit) => (
-                  <span
-                    key={`${cit.law}-${cit.section}`}
-                    className="article-badge national"
-                    tabIndex="0"
-                    aria-label={`${cit.law} ${cit.section}: ${cit.topic}`}
-                  >
-                    {overlay?.flag} {cit.law} {cit.section}
-                    <span className="article-tooltip" role="tooltip">
-                      <strong>{cit.law} {cit.section}</strong>
-                      <small>{cit.rationale}</small>
-                    </span>
-                  </span>
-                ))}
-              </div>
-              <div>
-                <select value={row.humanReview} onChange={(event) => handleReviewAction(row, event.target.value)}>
-                  {reviewOptions.map((option) => (
-                    <option value={option.value} key={option.value}>
-                      {option.label}
-                    </option>
-                  ))}
-                </select>
+      <div className="matrix-table">
+        <div className="matrix-header">
+          <span>Risk</span>
+          <span>Role risk evidence</span>
+          <span>AMLR trace</span>
+          <span>Human review</span>
+        </div>
+        {analysis.riskRegulationMatrix.map((row) => (
+          <div key={row.id} className="matrix-row">
+            <div>
+              <strong>{row.riskScenario}</strong>
+              <div className="risk-meta">
+                <span>Theme: {row.riskTheme}</span>
+                <span>Level: {row.riskLevel}</span>
+                <span>Evidence strength: {row.confidence}%</span>
               </div>
             </div>
-          ))}
-        </div>
-      )}
+            <div>
+              <p>{row.roleEvidence}</p>
+              <small>{row.competencyNeed}</small>
+            </div>
+            <div className="article-list">
+              {row.amlrArticles.map((article) => (
+                <span
+                  key={article.article}
+                  className="article-badge"
+                  tabIndex="0"
+                  aria-label={`${article.article}: ${article.title}. ${article.rationale}`}
+                >
+                  {article.article}
+                  <span className="article-tooltip" role="tooltip">
+                    <strong>{article.title}</strong>
+                    <small>{article.rationale}</small>
+                  </span>
+                </span>
+              ))}
+            </div>
+            <div>
+              <select value={row.humanReview} onChange={(event) => handleReviewAction(row, event.target.value)}>
+                {reviewOptions.map((option) => (
+                  <option value={option.value} key={option.value}>
+                    {option.label}
+                  </option>
+                ))}
+              </select>
+            </div>
+          </div>
+        ))}
+      </div>
 
       {canGenerateTraining && (
         <section id="matrix-ai-editor" className="review-workspace matrix-review is-bottom" aria-label="Matrix review workspace">
@@ -1917,6 +1864,134 @@ function MatrixView({
             setEditingRow(null);
           }}
         />
+      )}
+    </div>
+  );
+}
+
+function CountryInterpretationView({
+  analysis,
+  selectedCountry,
+  switchCountry,
+  isLoading,
+  prefetchStatus,
+  compareCountry,
+  compareAnalysis,
+  compareLoading,
+  runComparisonAnalysis,
+  clearComparison,
+}) {
+  const overlay = analysis.countryOverlay;
+  const compareOverlay = compareAnalysis?.countryOverlay;
+  const activeCountryCode = selectedCountry || overlay?.code;
+  const compareOptions = COUNTRIES.filter((c) => c.code !== activeCountryCode);
+  const matrix = analysis.riskRegulationMatrix ?? [];
+
+  return (
+    <div className="panel-section">
+      <div className="section-heading">
+        <p className="section-kicker">National overlay</p>
+        <h2>Country regulation interpretation mapping</h2>
+        <p>
+          The same EU AMLR regulation lands differently in each member state. Switch jurisdiction to
+          see how the matrix re-frames — national-law citations layered on AMLR articles, localised
+          role labels, and a country-mandatory training module. Side-by-side compare shows the
+          regulatory delta at a glance.
+        </p>
+      </div>
+
+      {!overlay ? (
+        <div className="empty-state">
+          <p>No country overlay attached to this run. Pick a country on the Role step and re-run the agents.</p>
+        </div>
+      ) : (
+        <>
+          <CountryOverlayBanner
+            overlay={overlay}
+            activeCountryCode={activeCountryCode}
+            isLoading={isLoading}
+            onSwitch={switchCountry}
+            prefetchStatus={prefetchStatus}
+            compareOptions={compareOptions}
+            compareCountry={compareCountry}
+            compareAnalysis={compareAnalysis}
+            compareLoading={compareLoading}
+            onCompare={runComparisonAnalysis}
+            onClearCompare={clearComparison}
+          />
+
+          {compareOverlay && compareAnalysis ? (
+            <CompareMatrix
+              baseAnalysis={analysis}
+              baseOverlay={overlay}
+              compareAnalysis={compareAnalysis}
+              compareOverlay={compareOverlay}
+            />
+          ) : (
+            <div className="matrix-table country-matrix">
+              <div className="matrix-header">
+                <span>Risk</span>
+                <span>Role risk evidence</span>
+                <span>AMLR + national citations</span>
+                <span>Localised role label</span>
+              </div>
+              {matrix.map((row) => (
+                <div key={row.id} className="matrix-row">
+                  <div>
+                    <strong>{row.riskScenario}</strong>
+                    <div className="risk-meta">
+                      <span>Theme: {row.riskTheme}</span>
+                      <span>Level: {row.riskLevel}</span>
+                    </div>
+                  </div>
+                  <div>
+                    <p>{row.roleEvidence}</p>
+                    <small>{row.competencyNeed}</small>
+                  </div>
+                  <div className="article-list">
+                    {row.amlrArticles.map((article) => (
+                      <span
+                        key={article.article}
+                        className="article-badge"
+                        tabIndex="0"
+                        aria-label={`${article.article}: ${article.title}. ${article.rationale}`}
+                      >
+                        {article.article}
+                        <span className="article-tooltip" role="tooltip">
+                          <strong>{article.title}</strong>
+                          <small>{article.rationale}</small>
+                        </span>
+                      </span>
+                    ))}
+                    {(row.nationalCitations ?? []).map((cit) => (
+                      <span
+                        key={`${cit.law}-${cit.section}`}
+                        className="article-badge national"
+                        tabIndex="0"
+                        aria-label={`${cit.law} ${cit.section}: ${cit.topic}`}
+                      >
+                        {overlay.flag} {cit.law} {cit.section}
+                        <span className="article-tooltip" role="tooltip">
+                          <strong>{cit.law} {cit.section}</strong>
+                          <small>{cit.rationale}</small>
+                        </span>
+                      </span>
+                    ))}
+                  </div>
+                  <div>
+                    {row.localRoleLabel ? (
+                      <div className="local-role-label" title="Localised role label for this jurisdiction">
+                        {overlay.flag} {row.localRoleLabel}
+                      </div>
+                    ) : (
+                      <small className="muted-copy">—</small>
+                    )}
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+        </>
       )}
     </div>
   );

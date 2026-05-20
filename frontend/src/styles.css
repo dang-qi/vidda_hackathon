@@ -979,6 +979,11 @@ h3 {
   grid-template-columns: 1.05fr 1.35fr 0.8fr 170px;
   gap: 18px;
   align-items: start;
+}
+
+.country-matrix .matrix-header,
+.country-matrix .matrix-row {
+  grid-template-columns: 1.05fr 1.35fr 1.1fr 1fr;
   padding: 18px;
 }
 
