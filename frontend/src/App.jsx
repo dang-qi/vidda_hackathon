@@ -2283,6 +2283,7 @@ function TrainingView({
   const allModules = analysis.trainingPlan.quarters.flatMap((quarter) => quarter.modules);
   const overlay = analysis.countryOverlay;
   const mandatoryCount = allModules.filter((module) => module.countryMandatory).length;
+  const displayQuarters = annotateDuplicateModuleTitles(analysis.trainingPlan.quarters);
   const trainingApproved = analysis.trainingPlan.lmsAssignments.some(
     (assignment) => assignment.approvalStatus === "approved_for_lms",
   );
@@ -2316,7 +2317,7 @@ function TrainingView({
       </div>
 
       <div className="quarter-grid">
-        {analysis.trainingPlan.quarters.map((quarter) => (
+        {displayQuarters.map((quarter) => (
           <section key={quarter.name} className="quarter-band">
             <h3>{quarter.name}</h3>
             <p>{quarter.focus}</p>
@@ -2329,12 +2330,12 @@ function TrainingView({
                         {overlay.flag} National
                       </span>
                     )}
-                    {module.title}
+                    {module.displayTitle || module.title}
                   </strong>
                   <span>{module.whyIncluded}</span>
                   <small>{module.assessment}</small>
                   <details className="module-explain">
-                    <summary>Why this module?</summary>
+                    <summary>Evidence and trace</summary>
                     <p>{module.whyExpanded}</p>
                     <dl>
                       <div>
@@ -2525,10 +2526,17 @@ function AuditView({
 }
 
 function HistoryView({ runs, selectedRun, loadRun, refreshHistory, downloadAuditPack }) {
+  const [activeArtifactType, setActiveArtifactType] = useState("role_information");
   const detail = selectedRun?.result;
   const matrix = detail?.riskRegulationMatrix ?? [];
   const quarters = detail?.trainingPlan?.quarters ?? [];
   const selectedRunId = selectedRun?.run_id;
+  const artifactCards = buildHistoryArtifactCards(selectedRun, detail, matrix, quarters);
+  const activeArtifact = artifactCards.find((artifact) => artifact.type === activeArtifactType) ?? artifactCards[0];
+
+  useEffect(() => {
+    setActiveArtifactType("role_information");
+  }, [selectedRunId]);
 
   return (
     <div className="panel-section">
@@ -2631,19 +2639,22 @@ function HistoryView({ runs, selectedRun, loadRun, refreshHistory, downloadAudit
               <div className="artifact-preview">
                 <h3>Saved artifacts</h3>
                 <div className="artifact-grid">
-                  <div>
-                    <span>Risk-regulation matrix</span>
-                    <strong>{matrix.length} mappings</strong>
-                  </div>
-                  <div>
-                    <span>Training path</span>
-                    <strong>{quarters.length} phases</strong>
-                  </div>
-                  <div>
-                    <span>Quality score</span>
-                    <strong>{detail?.qualityReview?.overallScore ?? "--"}%</strong>
-                  </div>
+                  {artifactCards.map((artifact) => (
+                    <button
+                      key={artifact.type}
+                      type="button"
+                      className={activeArtifact?.type === artifact.type ? "is-selected" : ""}
+                      onClick={() => setActiveArtifactType(artifact.type)}
+                      aria-pressed={activeArtifact?.type === artifact.type}
+                    >
+                      <span>{artifact.title}</span>
+                      <strong>{artifact.metric}</strong>
+                    </button>
+                  ))}
                 </div>
+                {activeArtifact && (
+                  <ArtifactInspector type={activeArtifact.type} title={activeArtifact.title} content={activeArtifact.content} />
+                )}
               </div>
 
               <div className="timeline">
@@ -2667,6 +2678,124 @@ function HistoryView({ runs, selectedRun, loadRun, refreshHistory, downloadAudit
             </>
           )}
         </section>
+      </div>
+    </div>
+  );
+}
+
+function buildHistoryArtifactCards(selectedRun, detail, matrix, quarters) {
+  if (!selectedRun) return [];
+  const artifactsByType = Object.fromEntries(
+    (selectedRun.artifacts ?? []).map((artifact) => [artifact.type, artifact.content]),
+  );
+  const roleInformation = artifactsByType.role_information ?? detail?.roleInformation ?? {
+    sourceRole: selectedRun.role ?? detail?.role,
+    parsedRole: artifactsByType.parsed_role ?? detail?.parsedRole,
+  };
+  return [
+    {
+      type: "role_information",
+      title: "Role information",
+      metric: roleInformation?.sourceRole?.team || roleInformation?.sourceRole?.persona || "Stored profile",
+      content: roleInformation,
+    },
+    {
+      type: "matrix",
+      title: "Risk-regulation matrix",
+      metric: `${matrix.length} mappings`,
+      content: artifactsByType.matrix ?? matrix,
+    },
+    {
+      type: "training_plan",
+      title: "Training path",
+      metric: `${quarters.length} phases`,
+      content: artifactsByType.training_plan ?? detail?.trainingPlan,
+    },
+    {
+      type: "quality_review",
+      title: "Quality review",
+      metric: `${artifactsByType.quality_review?.overallScore ?? detail?.qualityReview?.overallScore ?? "--"}%`,
+      content: artifactsByType.quality_review ?? detail?.qualityReview,
+    },
+    {
+      type: "audit_pack",
+      title: "Audit pack",
+      metric: `${artifactsByType.audit_pack?.evidenceItems ?? detail?.auditPack?.evidenceItems ?? "--"} evidence items`,
+      content: artifactsByType.audit_pack ?? detail?.auditPack,
+    },
+  ].filter((artifact) => artifact.content);
+}
+
+function ArtifactInspector({ type, title, content }) {
+  return (
+    <section className="artifact-inspector" aria-label={`${title} artifact preview`}>
+      <div className="artifact-inspector-heading">
+        <p className="section-kicker">Artifact preview</p>
+        <h4>{title}</h4>
+      </div>
+      {type === "role_information" && <RoleInformationOutput data={content} />}
+      {type === "matrix" && <MatrixOutput data={content} />}
+      {type === "training_plan" && <TrainingOutput data={content} />}
+      {type === "quality_review" && <QualityOutput data={content} />}
+      {type === "audit_pack" && <AuditPackOutput data={content} />}
+    </section>
+  );
+}
+
+function RoleInformationOutput({ data }) {
+  const sourceRole = data?.sourceRole ?? {};
+  const parsedRole = data?.parsedRole;
+  return (
+    <div className="role-artifact">
+      <dl className="compact-dl role-artifact-summary">
+        <div>
+          <dt>Role</dt>
+          <dd>{sourceRole.name || parsedRole?.name || "Unknown role"}</dd>
+        </div>
+        <div>
+          <dt>Team</dt>
+          <dd>{sourceRole.team || parsedRole?.team || "No team specified"}</dd>
+        </div>
+        <div>
+          <dt>Function</dt>
+          <dd>{sourceRole.persona || parsedRole?.function || "Not specified"}</dd>
+        </div>
+        <div>
+          <dt>Line of defence</dt>
+          <dd>{sourceRole.lineOfDefence || parsedRole?.lineOfDefence || "Not specified"}</dd>
+        </div>
+      </dl>
+      {sourceRole.description && <p className="muted-copy">{sourceRole.description}</p>}
+      {sourceRole.tasks?.length > 0 && (
+        <div className="agent-output-list">
+          {sourceRole.tasks.slice(0, 6).map((task, index) => (
+            <div key={`${task}-${index}`}>
+              <strong>Source responsibility</strong>
+              <p>{task}</p>
+            </div>
+          ))}
+        </div>
+      )}
+      {parsedRole && <ParsedRoleOutput data={parsedRole} />}
+    </div>
+  );
+}
+
+function AuditPackOutput({ data }) {
+  return (
+    <div className="agent-output-grid">
+      <div className="agent-output-card wide">
+        <span>Summary</span>
+        <strong>{data.summary}</strong>
+        <small>Quality score {data.qualityScore ?? "--"}%</small>
+      </div>
+      <div className="agent-output-card">
+        <span>Evidence items</span>
+        <strong>{data.evidenceItems ?? "--"}</strong>
+      </div>
+      <div className="agent-output-card">
+        <span>AMLR coverage</span>
+        <strong>{(data.amlrCoverage ?? []).join(", ") || "Pending"}</strong>
       </div>
     </div>
   );
@@ -2719,6 +2848,27 @@ function countTrainingModules(quarters) {
 
 function uniqueArticlesFromModules(modules) {
   return [...new Set(modules.flatMap((module) => module.amlrTrace ?? []))].slice(0, 6);
+}
+
+function annotateDuplicateModuleTitles(quarters) {
+  const seen = new Map();
+  const suffixes = ["scenario practice", "evidence review", "assessment lab", "governance check"];
+  return quarters.map((quarter) => ({
+    ...quarter,
+    modules: (quarter.modules ?? []).map((module) => {
+      const title = module.title || "Training module";
+      const key = title.toLowerCase();
+      const count = seen.get(key) ?? 0;
+      seen.set(key, count + 1);
+      if (count === 0) {
+        return module;
+      }
+      return {
+        ...module,
+        displayTitle: `${title} - ${suffixes[(count - 1) % suffixes.length]}`,
+      };
+    }),
+  }));
 }
 
 export default App;

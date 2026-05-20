@@ -677,6 +677,7 @@ def training_designer_node(state: WorkflowState) -> dict[str, Any]:
         "requirements": [
             "The plan must not be generic AML awareness only.",
             "Include scenario-based assessment for high-risk or critical mappings.",
+            "Module titles must be unique across the whole training path; if two modules cover the same theme, make one title clearly practical, scenario-based, governance-focused, or evidence-focused.",
             "LMS assignment must be ready for approval, not silently approved.",
         ],
     }
@@ -858,6 +859,10 @@ def format_agent_response(state: WorkflowState) -> dict[str, Any]:
             "team": role["team"],
             "persona": role["persona"],
             "lineOfDefence": role["lineOfDefence"],
+        },
+        "roleInformation": {
+            "sourceRole": role,
+            "parsedRole": state["parsed_role"],
         },
         "agents": state["agents"],
         "parsedRole": state["parsed_role"],

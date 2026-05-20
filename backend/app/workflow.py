@@ -285,6 +285,10 @@ def run_workflow(role: dict[str, Any], country_code: str | None = None) -> dict[
             "persona": role["persona"],
             "lineOfDefence": role["lineOfDefence"],
         },
+        "roleInformation": {
+            "sourceRole": role,
+            "parsedRole": parsed,
+        },
         "agents": [
             {
                 "name": "Role Parser Agent",
@@ -649,7 +653,22 @@ def enrich_training_plan(training: dict[str, Any], matrix: list[dict[str, Any]])
         assignment.setdefault("lmsStatus", "Not assigned")
         assignment.setdefault("owner", "Compliance Manager")
         assignment.setdefault("dueWindow", "Year 1 phased rollout")
+    ensure_unique_module_titles(training)
     return training
+
+
+def ensure_unique_module_titles(training: dict[str, Any]) -> None:
+    seen: dict[str, int] = {}
+    suffixes = ["scenario practice", "evidence review", "assessment lab", "governance check"]
+    for quarter in training.get("quarters", []):
+        for module in quarter.get("modules", []):
+            title = str(module.get("title") or "Training module").strip()
+            key = title.lower()
+            count = seen.get(key, 0)
+            if count:
+                suffix = suffixes[(count - 1) % len(suffixes)]
+                module["title"] = f"{title} - {suffix}"
+            seen[key] = count + 1
 
 
 def apply_country_overrides(result: dict[str, Any], country_code: str | None) -> dict[str, Any]:

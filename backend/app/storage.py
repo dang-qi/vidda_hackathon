@@ -82,6 +82,10 @@ def save_workflow_run(
     role = result.get("role") or {}
     completed_at = now_iso()
     artifacts = {
+        "role_information": result.get("roleInformation") or {
+            "sourceRole": role,
+            "parsedRole": result.get("parsedRole"),
+        },
         "parsed_role": result.get("parsedRole"),
         "matrix": result.get("riskRegulationMatrix"),
         "training_plan": result.get("trainingPlan"),
