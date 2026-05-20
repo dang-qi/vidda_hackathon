@@ -44,7 +44,7 @@ run:
 stop:
 	@if [ -f $(BACKEND_PID) ]; then kill $$(cat $(BACKEND_PID)) 2>/dev/null || true; rm -f $(BACKEND_PID); fi
 	@if [ -f $(FRONTEND_PID) ]; then kill $$(cat $(FRONTEND_PID)) 2>/dev/null || true; rm -f $(FRONTEND_PID); fi
-	@pkill -f "uvicorn backend.app.main:app" 2>/dev/null || true
-	@pkill -f "vite" 2>/dev/null || true
-	@pkill -f "npm run dev" 2>/dev/null || true
+	@pkill -f "[u]vicorn backend.app.main:app" 2>/dev/null || true
+	@pkill -f "[v]ite" 2>/dev/null || true
+	@pkill -f "[n]pm run dev" 2>/dev/null || true
 	@echo "stopped"
