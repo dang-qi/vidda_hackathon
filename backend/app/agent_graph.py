@@ -347,6 +347,7 @@ def regulation_mapper_node(state: WorkflowState) -> dict[str, Any]:
         },
     )
     rows = [normalize_matrix_row(row.model_dump()) for row in mapped.rows]
+    rows.sort(key=lambda r: r.get("confidence", 0), reverse=True)
     return {
         "matrix": rows,
         "agents": [
