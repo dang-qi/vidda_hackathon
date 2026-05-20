@@ -4,6 +4,7 @@ const API_BASE = import.meta.env.VITE_API_BASE ?? "http://localhost:8000";
 const VIDDA_LOGO =
   "https://vidda.io/_next/image?url=https%3A%2F%2Fa.storyblok.com%2Ff%2F290798558767898%2F477x72%2Fee934cc8bd%2Fvidda_logo.png&w=3840&q=75";
 const ACTIVE_JOB_KEY = "vidda.activeAnalysisJobId";
+const LAST_RUN_KEY = "vidda.lastCompletedRunId";
 
 const reviewOptions = [
   { value: "needs-review", label: "Needs review" },
@@ -72,6 +73,7 @@ function App() {
   useEffect(() => {
     const savedJobId = safeStorageGet(ACTIVE_JOB_KEY);
     if (!savedJobId) {
+      restoreLastResult();
       return;
     }
     setIsLoading(true);
@@ -85,6 +87,7 @@ function App() {
       .then((savedJob) => {
         setJob(savedJob);
         if (savedJob.status === "complete" && savedJob.result) {
+          safeStorageSet(LAST_RUN_KEY, savedJob.result.workflowId);
           setAnalysis(savedJob.result);
           setActiveStep("matrix");
           setIsLoading(false);
@@ -98,6 +101,7 @@ function App() {
       })
       .catch(() => {
         safeStorageRemove(ACTIVE_JOB_KEY);
+        restoreLastResult();
         setIsLoading(false);
       });
   }, []);
@@ -120,6 +124,7 @@ function App() {
         setJob(nextJob);
         if (nextJob.status === "complete" && nextJob.result) {
           safeStorageRemove(ACTIVE_JOB_KEY);
+          safeStorageSet(LAST_RUN_KEY, nextJob.result.workflowId);
           setAnalysis(nextJob.result);
           setActiveStep("matrix");
           setIsLoading(false);
@@ -186,8 +191,34 @@ function App() {
       if (selectedRun && !data.some((run) => run.run_id === selectedRun.run_id)) {
         setSelectedRun(null);
       }
+      return data;
     } catch {
       // History is supporting context; keep the primary workflow usable if it is unavailable.
+      return [];
+    }
+  }
+
+  async function restoreLastResult() {
+    try {
+      const runs = await loadHistory();
+      if (!runs.length) {
+        return;
+      }
+      const savedRunId = safeStorageGet(LAST_RUN_KEY);
+      const runToLoad = runs.find((run) => run.run_id === savedRunId) ?? runs[0];
+      const response = await fetch(`${API_BASE}/api/history/runs/${runToLoad.run_id}`);
+      if (!response.ok) {
+        throw new Error("last run not found");
+      }
+      const data = await response.json();
+      safeStorageSet(LAST_RUN_KEY, data.run_id);
+      setSelectedRun(data);
+      if (!analysis) {
+        setAnalysis(data.result);
+        setActiveStep("matrix");
+      }
+    } catch {
+      safeStorageRemove(LAST_RUN_KEY);
     }
   }
 
@@ -198,6 +229,7 @@ function App() {
         throw new Error("run detail failed");
       }
       const data = await response.json();
+      safeStorageSet(LAST_RUN_KEY, data.run_id);
       setSelectedRun(data);
     } catch {
       setError("Could not load the saved workflow run.");
@@ -606,6 +638,32 @@ function RoleIntake({
 function AgentProgress({ job, nowMs }) {
   const running = job.steps.find((step) => step.status === "running");
   const liveTotalMs = liveElapsed(job, nowMs);
+  const inspectableSteps = job.steps.filter((step) => getStepOutput(step, job));
+  const latestInspectable = inspectableSteps.at(-1);
+  const [selectedStepId, setSelectedStepId] = useState(latestInspectable?.id ?? job.steps[0]?.id);
+  const [manualSelection, setManualSelection] = useState(false);
+  const selectedStep =
+    job.steps.find((step) => step.id === selectedStepId && getStepOutput(step, job)) ??
+    latestInspectable ??
+    job.steps.find((step) => step.status === "running") ??
+    job.steps[0];
+
+  useEffect(() => {
+    if (!latestInspectable) {
+      return;
+    }
+    const selectedHasOutput = job.steps.some(
+      (step) => step.id === selectedStepId && getStepOutput(step, job),
+    );
+    if (!manualSelection || !selectedHasOutput) {
+      setSelectedStepId(latestInspectable.id);
+    }
+  }, [job, latestInspectable?.id, manualSelection, selectedStepId]);
+
+  useEffect(() => {
+    setManualSelection(false);
+  }, [job.jobId]);
+
   return (
     <section className="progress-panel" aria-label="Agent workflow progress">
       <div className="progress-heading">
@@ -620,18 +678,34 @@ function AgentProgress({ job, nowMs }) {
       </div>
 
       <div className="agent-graph">
-        {job.steps.map((step, index) => (
+        {job.steps.map((step, index) => {
+          const output = getStepOutput(step, job);
+          const canInspect = Boolean(output);
+          return (
           <React.Fragment key={step.id}>
-            <div className={`graph-node is-${step.status}`}>
+            <button
+              type="button"
+              className={`graph-node is-${step.status} ${selectedStep?.id === step.id ? "is-selected" : ""}`}
+              onClick={() => {
+                if (!canInspect) return;
+                setSelectedStepId(step.id);
+                setManualSelection(true);
+              }}
+              disabled={!canInspect}
+              aria-pressed={selectedStep?.id === step.id}
+            >
               <span>{String(index + 1).padStart(2, "0")}</span>
               <strong>{step.name}</strong>
               <small>{step.statusLabel || labelForStatus(step.status)}</small>
               <em>{formatStepElapsed(job, step, nowMs)}</em>
-            </div>
+            </button>
             {index < job.steps.length - 1 && <div className={`graph-edge is-${step.status}`} />}
           </React.Fragment>
-        ))}
+        );
+        })}
       </div>
+
+      <AgentOutputPanel step={selectedStep} output={getStepOutput(selectedStep, job)} />
 
       {job.error && (
         <div className="progress-note">
@@ -639,6 +713,201 @@ function AgentProgress({ job, nowMs }) {
         </div>
       )}
     </section>
+  );
+}
+
+function getStepOutput(step, job) {
+  if (!step) return null;
+  if (step.output) return step.output;
+  const result = job?.result;
+  if (!result) return null;
+  const outputByStep = {
+    role_parser: { type: "parsed_role", title: "Parsed role profile", data: result.parsedRole },
+    risk_mapper: { type: "risks", title: "Risk exposure map", data: result.riskRegulationMatrix?.map((row) => ({
+      theme: row.riskTheme,
+      level: row.riskLevel,
+      scenario: row.riskScenario,
+      evidence: row.roleEvidence,
+      impact: row.whyItMatters,
+    })) },
+    regulation_mapper: { type: "matrix", title: "Risk-regulation matrix", data: result.riskRegulationMatrix },
+    training_designer: { type: "training_plan", title: "Training path", data: result.trainingPlan },
+    quality_reviewer: { type: "quality_review", title: "Quality review", data: result.qualityReview },
+  };
+  const output = outputByStep[step.id];
+  return output?.data ? output : null;
+}
+
+function AgentOutputPanel({ step, output }) {
+  return (
+    <div className="agent-output-panel">
+      <div className="agent-output-heading">
+        <div>
+          <p className="section-kicker">Agent result inspector</p>
+          <h3>{output?.title ?? step?.name ?? "Waiting for first result"}</h3>
+        </div>
+        <InspectorStatusBadge value={output ? "available" : "waiting"} />
+      </div>
+      {!output && (
+        <p className="muted-copy">
+          The first completed agent result will appear here. Completed nodes become clickable for review.
+        </p>
+      )}
+      {output?.type === "parsed_role" && <ParsedRoleOutput data={output.data} />}
+      {output?.type === "risks" && <RiskOutput data={output.data} />}
+      {output?.type === "matrix" && <MatrixOutput data={output.data} />}
+      {output?.type === "training_plan" && <TrainingOutput data={output.data} />}
+      {output?.type === "quality_review" && <QualityOutput data={output.data} />}
+    </div>
+  );
+}
+
+function ParsedRoleOutput({ data }) {
+  return (
+    <div className="agent-output-grid">
+      <div className="agent-output-card">
+        <span>Role function</span>
+        <strong>{data.function}</strong>
+        <small>{riskGovernanceLabel(data.lineOfDefence)}</small>
+      </div>
+      <div className="agent-output-card">
+        <span>Decision rights</span>
+        <strong>{data.decisionAuthority}</strong>
+        <small>Input evidence quality: {sourceQualityLabel(data.sourceQuality)}</small>
+      </div>
+      <div className="agent-output-card wide">
+        <span>Reviewer checkpoint</span>
+        <strong>Confirm role profile before risk mapping.</strong>
+        <small>Reviewer should check responsibilities, risk governance position and decision rights before downstream agents use this profile.</small>
+      </div>
+      <div className="agent-output-list wide">
+        {(data.responsibilities ?? []).map((item, index) => (
+          <div key={`${item.text}-${index}`}>
+            <strong>{item.text}</strong>
+            {item.evidence && item.evidence !== item.text && <small>Source evidence: {item.evidence}</small>}
+            <InspectorStatusBadge value={item.humanReview === "accepted" ? "confirmed" : "needs_confirmation"} />
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function InspectorStatusBadge({ value }) {
+  const labels = {
+    available: "Result available",
+    waiting: "Waiting",
+    confirmed: "Source confirmed",
+    needs_confirmation: "Needs confirmation",
+  };
+  return <span className={`inspector-badge is-${value}`}>{labels[value] ?? value}</span>;
+}
+
+function riskGovernanceLabel(value) {
+  if (!value) return "Risk governance position not specified";
+  const normalized = String(value).toLowerCase();
+  if (normalized.includes("first")) {
+    return `${value}: owns or performs day-to-day controls close to customers, cases or operations.`;
+  }
+  if (normalized.includes("second")) {
+    return `${value}: sets policy, monitors controls, challenges the first line and handles specialist compliance decisions.`;
+  }
+  if (normalized.includes("third")) {
+    return `${value}: independently audits whether controls and governance are effective.`;
+  }
+  return value;
+}
+
+function sourceQualityLabel(value) {
+  if (!value) return "Not assessed";
+  const normalized = String(value).toLowerCase();
+  if (normalized === "high") return "High: source role gives concrete tasks, responsibilities and risk signals.";
+  if (normalized === "medium") return "Medium: source role is usable but needs reviewer confirmation.";
+  if (normalized === "low") return "Low: source role is too thin for confident mapping.";
+  return value;
+}
+
+function RiskOutput({ data }) {
+  return (
+    <div className="agent-output-list">
+      {(data ?? []).map((risk, index) => (
+        <div key={`${risk.scenario}-${index}`}>
+          <strong>{risk.scenario}</strong>
+          <small>{risk.theme} · {risk.level}</small>
+          <p>{risk.evidence}</p>
+          <p>{risk.impact}</p>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function MatrixOutput({ data }) {
+  return (
+    <div className="agent-output-list">
+      {(data ?? []).map((row) => (
+        <div key={row.id}>
+          <strong>{row.riskScenario}</strong>
+          <small>{row.riskTheme} · {row.riskLevel} · Evidence strength {row.confidence}%</small>
+          <p>{row.roleEvidence}</p>
+          <span>{row.amlrArticles.map((article) => article.article).join(", ")}</span>
+          <StatusBadge value={row.humanReview === "accepted" || row.humanReview === "edited" ? "matrix_approved" : "needs_review"} />
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function TrainingOutput({ data }) {
+  const modules = data.quarters?.flatMap((quarter) => quarter.modules ?? []) ?? [];
+  return (
+    <div className="agent-output-grid">
+      <div className="agent-output-card">
+        <span>Training path</span>
+        <strong>{data.title}</strong>
+        <small>{modules.length} modules · {data.quarters?.length ?? 0} phases</small>
+      </div>
+      <div className="agent-output-card">
+        <span>LMS status</span>
+        <strong>{data.lmsAssignments?.[0]?.status ?? "Ready for approval"}</strong>
+        <small>{data.lmsAssignments?.[0]?.mandatoryModules ?? modules.length} mandatory modules</small>
+      </div>
+      <div className="agent-output-list wide">
+        {modules.slice(0, 6).map((module) => (
+          <div key={module.moduleId || module.title}>
+            <strong>{module.title}</strong>
+            <small>{module.competencyType || "Competency"} · {(module.amlrTrace ?? []).join(", ")}</small>
+            <p>{module.whyExpanded || module.whyIncluded}</p>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function QualityOutput({ data }) {
+  return (
+    <div className="agent-output-grid">
+      <div className="agent-output-card">
+        <span>Overall score</span>
+        <strong>{data.overallScore}%</strong>
+        <small>Compliance QA review</small>
+      </div>
+      {(data.dimensions ?? []).map((dimension) => (
+        <div className="agent-output-card" key={dimension.name}>
+          <span>{dimension.name}</span>
+          <strong>{dimension.score}%</strong>
+        </div>
+      ))}
+      <div className="agent-output-list wide">
+        {(data.reviewFlags ?? []).map((flag) => (
+          <div key={`${flag.target}-${flag.message}`}>
+            <strong>{flag.severity} · {flag.target}</strong>
+            <p>{flag.message}</p>
+          </div>
+        ))}
+      </div>
+    </div>
   );
 }
 

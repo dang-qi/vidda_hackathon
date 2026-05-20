@@ -111,6 +111,7 @@ def start_analyze(request: AnalyzeRequest) -> dict[str, Any]:
                 "status": "pending",
                 "elapsedMs": None,
                 "error": None,
+                "output": None,
             }
             for step in AGENT_STEPS
         ],
@@ -230,6 +231,8 @@ def run_job(job_id: str, request: AnalyzeRequest, role: dict[str, Any], started:
                         step["elapsedMs"] = payload["elapsedMs"]
                     if "error" in payload:
                         step["error"] = payload["error"]
+                    if "output" in payload:
+                        step["output"] = payload["output"]
                     break
 
     try:
