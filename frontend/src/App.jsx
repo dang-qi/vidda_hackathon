@@ -14,6 +14,13 @@ const reviewOptions = [
   { value: "rejected", label: "Rejected" },
 ];
 
+const riskLevelOrder = {
+  Critical: 0,
+  High: 1,
+  Medium: 2,
+  Low: 3,
+};
+
 const emptyRoleForm = {
   name: "",
   team: "",
@@ -1716,6 +1723,7 @@ function MatrixView({
   const [matrixInstruction, setMatrixInstruction] = useState("");
   const [targetRowId, setTargetRowId] = useState("");
   const [editingRow, setEditingRow] = useState(null);
+  const matrixRows = sortRiskRowsByLevel(analysis.riskRegulationMatrix);
 
   function handleReviewAction(row, value) {
     if (value === "edited") {
@@ -1760,7 +1768,7 @@ function MatrixView({
           <span>AMLR trace</span>
           <span>Human review</span>
         </div>
-        {analysis.riskRegulationMatrix.map((row) => (
+        {matrixRows.map((row) => (
           <div key={row.id} className="matrix-row">
             <div>
               <strong>{row.riskScenario}</strong>
@@ -1815,7 +1823,7 @@ function MatrixView({
           <div className="conversation-panel">
             <select value={targetRowId} onChange={(event) => setTargetRowId(event.target.value)}>
               <option value="">Apply to whole matrix</option>
-              {analysis.riskRegulationMatrix.map((row) => (
+              {matrixRows.map((row) => (
                 <option value={row.id} key={row.id}>
                   {row.id}: {row.riskScenario}
                 </option>
@@ -1885,7 +1893,7 @@ function CountryInterpretationView({
   const compareOverlay = compareAnalysis?.countryOverlay;
   const activeCountryCode = selectedCountry || overlay?.code;
   const compareOptions = COUNTRIES.filter((c) => c.code !== activeCountryCode);
-  const matrix = analysis.riskRegulationMatrix ?? [];
+  const matrix = sortRiskRowsByLevel(analysis.riskRegulationMatrix);
 
   return (
     <div className="panel-section">
@@ -2096,8 +2104,8 @@ function CountryOverlayBanner({
 }
 
 function CompareMatrix({ baseAnalysis, baseOverlay, compareAnalysis, compareOverlay }) {
-  const baseRows = baseAnalysis.riskRegulationMatrix;
-  const compareRows = compareAnalysis.riskRegulationMatrix;
+  const baseRows = sortRiskRowsByLevel(baseAnalysis.riskRegulationMatrix);
+  const compareRows = sortRiskRowsByLevel(compareAnalysis.riskRegulationMatrix);
   const pairs = baseRows.map((row, index) => ({
     base: row,
     compare: compareRows[index] || null,
@@ -2848,6 +2856,16 @@ function countTrainingModules(quarters) {
 
 function uniqueArticlesFromModules(modules) {
   return [...new Set(modules.flatMap((module) => module.amlrTrace ?? []))].slice(0, 6);
+}
+
+function sortRiskRowsByLevel(rows = []) {
+  return [...(rows ?? [])].sort((a, b) => {
+    const levelDelta = (riskLevelOrder[a.riskLevel] ?? 99) - (riskLevelOrder[b.riskLevel] ?? 99);
+    if (levelDelta !== 0) return levelDelta;
+    const confidenceDelta = (b.confidence ?? 0) - (a.confidence ?? 0);
+    if (confidenceDelta !== 0) return confidenceDelta;
+    return String(a.id ?? "").localeCompare(String(b.id ?? ""));
+  });
 }
 
 function annotateDuplicateModuleTitles(quarters) {

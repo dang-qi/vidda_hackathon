@@ -25,6 +25,7 @@ from .workflow import (
     regulation_mapper_agent,
     risk_mapper_agent,
     role_parser_agent,
+    sort_matrix_rows_by_level,
     source_pack,
     training_designer_agent,
 )
@@ -377,7 +378,7 @@ def revise_matrix_rows(
                 )
             )
         return {
-            "updatedRows": updated_rows,
+            "updatedRows": sort_matrix_rows_by_level(updated_rows),
             "changeSummary": ["Applied reviewer note to the selected matrix scope."],
         }
 
@@ -401,7 +402,9 @@ def revise_matrix_rows(
             },
         )
         return {
-            "updatedRows": [normalize_matrix_row(row.model_dump()) for row in revision.updatedRows],
+            "updatedRows": sort_matrix_rows_by_level(
+                [normalize_matrix_row(row.model_dump()) for row in revision.updatedRows]
+            ),
             "changeSummary": revision.changeSummary,
         }
     except Exception:
@@ -652,7 +655,7 @@ def regulation_mapper_node(state: WorkflowState) -> dict[str, Any]:
         payload,
     )
     rows = [normalize_matrix_row(row.model_dump()) for row in mapped.rows]
-    rows.sort(key=lambda r: r.get("confidence", 0), reverse=True)
+    rows = sort_matrix_rows_by_level(rows)
     return {
         "matrix": rows,
         "agents": [
@@ -999,7 +1002,7 @@ def revise_matrix_rows_without_model(
             )
         )
     return {
-        "updatedRows": updated_rows,
+        "updatedRows": sort_matrix_rows_by_level(updated_rows),
         "changeSummary": ["Applied reviewer note to the selected matrix scope."],
     }
 

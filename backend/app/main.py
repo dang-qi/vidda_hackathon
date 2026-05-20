@@ -26,7 +26,7 @@ from .agent_graph import (
     run_agent_workflow,
 )
 from .storage import add_review_action, build_audit_export, get_run, init_db, list_runs, save_workflow_run
-from .workflow import ROLE_CATALOG, apply_country_overrides, get_role, run_workflow
+from .workflow import ROLE_CATALOG, apply_country_overrides, get_role, run_workflow, sort_matrix_rows_by_level
 
 
 app = FastAPI(
@@ -266,6 +266,7 @@ def update_workflow_matrix_row(workflow_id: str, request: MatrixRowUpdateRequest
             updated_row if row.get("id") == target_id else row
             for row in state["matrix"]
         ]
+        state["matrix"] = sort_matrix_rows_by_level(state["matrix"])
         state["updatedAt"] = datetime.now(timezone.utc).isoformat()
         state["changeSummary"] = [f"Matrix row {target_id} edited directly."]
     return review_workflow_response(workflow_id)

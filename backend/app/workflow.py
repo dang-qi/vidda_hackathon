@@ -32,6 +32,13 @@ AMLR_ARTICLES = {
     },
 }
 
+RISK_LEVEL_ORDER = {
+    "Critical": 0,
+    "High": 1,
+    "Medium": 2,
+    "Low": 3,
+}
+
 SOURCE_PACK = [
     {
         "name": "Hackathon challenge overview",
@@ -415,8 +422,25 @@ def regulation_mapper_agent(risks: list[dict[str, Any]]) -> list[dict[str, Any]]
                 "humanReview": "needs-review" if item["level"] in ["Critical", "High"] else "accepted",
             }
         )
-    rows.sort(key=lambda r: r.get("confidence", 0), reverse=True)
-    return rows
+    return sort_matrix_rows_by_level(rows)
+
+
+def sort_matrix_rows_by_level(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return sorted(
+        rows,
+        key=lambda row: (
+            RISK_LEVEL_ORDER.get(str(row.get("riskLevel", "")).strip(), 99),
+            -confidence_score(row),
+            str(row.get("id") or ""),
+        ),
+    )
+
+
+def confidence_score(row: dict[str, Any]) -> float:
+    try:
+        return float(row.get("confidence") or 0)
+    except (TypeError, ValueError):
+        return 0
 
 
 def training_designer_agent(role: dict[str, Any], matrix: list[dict[str, Any]]) -> dict[str, Any]:
