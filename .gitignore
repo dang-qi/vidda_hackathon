@@ -7,3 +7,4 @@ backend/data/*.sqlite3
 .env
 CLAUDE.md
 .venv/
+.run/
