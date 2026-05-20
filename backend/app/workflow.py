@@ -146,6 +146,111 @@ ROLE_CATALOG = [
 ROLE_BY_ID = {role["id"]: role for role in ROLE_CATALOG}
 
 
+COUNTRY_OVERRIDES: dict[str, dict[str, Any]] = {
+    "SE": {
+        "code": "SE",
+        "name": "Sweden",
+        "flag": "🇸🇪",
+        "confidence": 88,
+        "confidenceRationale": "Swedish law already uses explicit AML functions, documented role-tailored training and an independent review function.",
+        "roleLabelMap": {
+            "kyc-analyst": "KYC-analytiker (centralt funktionsansvarig)",
+            "customer-advisor": "Kundtjänsthandläggare",
+            "tm-analyst": "Transaktionsövervakningsanalytiker",
+            "mlro": "Centralt funktionsansvarig + särskilt utsedd befattningshavare",
+            "aml-ddi-manager": "AML-chef (DDI)",
+        },
+        "additionalCitations": [
+            {"law": "FFFS 2017:11", "section": "Ch. 4 §1-3", "topic": "training cadence and role-tailored coverage"},
+            {"law": "Lag 2017:630", "section": "Ch. 6 §1-3", "topic": "central function and independent review"},
+        ],
+        "trainingFrequencyDefault": "Annual documented role-tailored refresher",
+        "independentReviewRequirement": "internal_review_function",
+        "independentReviewLabel": "Independent review function (internal)",
+        "mandatoryModuleHint": {
+            "title": "Independent review evidence pack",
+            "quarter": "Q4",
+            "whyIncluded": "Required by Lag 2017:630 Ch. 6 — Finansinspektionen expects evidence of role-tailored training and an organisationally independent review function.",
+            "assessment": "Evidence pack reviewed by central function officer",
+        },
+        "sourceLaws": [
+            {"title": "Lag (2017:630) on measures against money laundering and terrorist financing", "url": "https://www.riksdagen.se/sv/dokument-och-lagar/dokument/svensk-forfattningssamling/lag-2017630-om-atgarder-mot-penningtvatt-och_sfs-2017-630/"},
+            {"title": "FFFS 2017:11 — Finansinspektionen's regulations", "url": "https://www.fi.se/contentassets/423320243f35401f97aa85d5562df59c/fs1711.pdf"},
+        ],
+    },
+    "ES": {
+        "code": "ES",
+        "name": "Spain",
+        "flag": "🇪🇸",
+        "confidence": 90,
+        "confidenceRationale": "Spanish law (Ley 10/2010) explicitly requires an Internal Control Body (OCI), an annual training plan and an annual external expert review.",
+        "roleLabelMap": {
+            "kyc-analyst": "Analista KYC (representante ante SEPBLAC)",
+            "customer-advisor": "Asesor de cliente",
+            "tm-analyst": "Analista de monitorización de transacciones",
+            "mlro": "OCI + Representante ante SEPBLAC",
+            "aml-ddi-manager": "Director de cumplimiento AML",
+        },
+        "additionalCitations": [
+            {"law": "Ley 10/2010", "section": "art. 26", "topic": "Internal Control Body (OCI) and annual training plan"},
+            {"law": "RD 304/2014", "section": "art. 28-30", "topic": "annual external expert review"},
+            {"law": "SEPBLAC manual", "section": "—", "topic": "supervisor expectations"},
+        ],
+        "trainingFrequencyDefault": "Annual formal training plan + annual external expert review",
+        "independentReviewRequirement": "external_expert_mandatory",
+        "independentReviewLabel": "Annual external expert review (mandatory)",
+        "mandatoryModuleHint": {
+            "title": "External expert review preparation",
+            "quarter": "Q4",
+            "whyIncluded": "Spanish AML regime requires an annual external expert review (RD 304/2014 art. 28). Staff must be able to evidence the training programme to the external expert.",
+            "assessment": "Mock external expert interview + evidence pack",
+        },
+        "sourceLaws": [
+            {"title": "Ley 10/2010 — prevención del blanqueo de capitales", "url": "https://www.boe.es/buscar/act.php?id=BOE-A-2010-6737"},
+            {"title": "Real Decreto 304/2014", "url": "https://www.boe.es/buscar/act.php?id=BOE-A-2014-4742"},
+        ],
+    },
+    "DE": {
+        "code": "DE",
+        "name": "Germany",
+        "flag": "🇩🇪",
+        "confidence": 85,
+        "confidenceRationale": "GwG and BaFin practice already formalise the Geldwäschebeauftragter (MLRO), internal safeguarding measures and structured training paths.",
+        "roleLabelMap": {
+            "kyc-analyst": "KYC-Analyst (erste Verteidigungslinie)",
+            "customer-advisor": "Kundenberater",
+            "tm-analyst": "Transaktionsüberwachungs-Analyst",
+            "mlro": "Geldwäschebeauftragter + Stellvertreter",
+            "aml-ddi-manager": "AML-Abteilungsleiter (DDI)",
+        },
+        "additionalCitations": [
+            {"law": "GwG", "section": "§6 + §7", "topic": "internal safeguarding measures and Geldwäschebeauftragter"},
+            {"law": "GwG", "section": "§10", "topic": "customer due diligence requirements"},
+            {"law": "BaFin AuA", "section": "—", "topic": "interpretation and application notes"},
+        ],
+        "trainingFrequencyDefault": "Annual + incident-based with documented evidence",
+        "independentReviewRequirement": "internal_audit_with_deputy",
+        "independentReviewLabel": "Internal audit + deputy MLRO handover",
+        "mandatoryModuleHint": {
+            "title": "Deputy MLRO handover protocol",
+            "quarter": "Q3",
+            "whyIncluded": "GwG §7 requires a deputy Geldwäschebeauftragter; BaFin expects a documented handover protocol ensuring continuity of the MLRO function.",
+            "assessment": "Handover simulation reviewed by MLRO",
+        },
+        "sourceLaws": [
+            {"title": "Geldwäschegesetz (GwG)", "url": "https://www.gesetze-im-internet.de/gwg_2017/BJNR182210017.html"},
+            {"title": "BaFin — Auslegungs- und Anwendungshinweise zum GwG", "url": "https://www.bafin.de/SharedDocs/Downloads/DE/Auslegungsentscheidung/dl_ae_auas_gw.pdf"},
+        ],
+    },
+}
+
+
+def get_country_override(country_code: str | None) -> dict[str, Any] | None:
+    if not country_code:
+        return None
+    return COUNTRY_OVERRIDES.get(country_code.upper())
+
+
 def get_role(role_id: str | None, custom_role: dict[str, Any] | None = None) -> dict[str, Any]:
     if custom_role:
         return {
@@ -163,14 +268,14 @@ def get_role(role_id: str | None, custom_role: dict[str, Any] | None = None) -> 
     return ROLE_BY_ID[role_id]
 
 
-def run_workflow(role: dict[str, Any]) -> dict[str, Any]:
+def run_workflow(role: dict[str, Any], country_code: str | None = None) -> dict[str, Any]:
     parsed = role_parser_agent(role)
     risks = risk_mapper_agent(role, parsed)
     matrix = regulation_mapper_agent(risks)
     training = training_designer_agent(role, matrix)
     quality = quality_reviewer_agent(role, matrix, training)
 
-    return {
+    result: dict[str, Any] = {
         "workflowId": f"wf_{uuid4().hex[:10]}",
         "generatedAt": datetime.now(timezone.utc).isoformat(),
         "role": {
@@ -214,6 +319,8 @@ def run_workflow(role: dict[str, Any]) -> dict[str, Any]:
         "auditPack": build_audit_pack(role, matrix, quality),
         "sourcePack": source_pack(),
     }
+    apply_country_overrides(result, country_code)
+    return result
 
 
 def role_parser_agent(role: dict[str, Any]) -> dict[str, Any]:
@@ -543,6 +650,80 @@ def enrich_training_plan(training: dict[str, Any], matrix: list[dict[str, Any]])
         assignment.setdefault("owner", "Compliance Manager")
         assignment.setdefault("dueWindow", "Year 1 phased rollout")
     return training
+
+
+def apply_country_overrides(result: dict[str, Any], country_code: str | None) -> dict[str, Any]:
+    """Layer country-specific national-law context onto a workflow result.
+
+    Additive only — never replaces existing AMLR fields. Idempotent: re-applying
+    the same country code does not duplicate the mandatory module.
+    """
+    override = get_country_override(country_code)
+    if not override:
+        return result
+
+    result["countryOverlay"] = {
+        "code": override["code"],
+        "name": override["name"],
+        "flag": override["flag"],
+        "confidence": override["confidence"],
+        "confidenceRationale": override["confidenceRationale"],
+        "trainingFrequencyDefault": override["trainingFrequencyDefault"],
+        "independentReviewRequirement": override["independentReviewRequirement"],
+        "independentReviewLabel": override["independentReviewLabel"],
+        "additionalCitations": override["additionalCitations"],
+        "sourceLaws": override["sourceLaws"],
+    }
+
+    role_id = result.get("role", {}).get("id", "")
+    local_role_label = override["roleLabelMap"].get(role_id, "")
+
+    for row in result.get("riskRegulationMatrix", []) or []:
+        row["nationalCitations"] = [
+            {
+                "law": cit["law"],
+                "section": cit["section"],
+                "topic": cit["topic"],
+                "rationale": f"{cit['law']} {cit['section']} layers {cit['topic']} requirements on top of AMLR for {override['name']}.",
+            }
+            for cit in override["additionalCitations"]
+        ]
+        if local_role_label:
+            row["localRoleLabel"] = local_role_label
+
+    training = result.get("trainingPlan", {}) or {}
+    quarters = training.get("quarters", []) or []
+    hint = override["mandatoryModuleHint"]
+    target_quarter = next(
+        (q for q in quarters if q.get("name", "").upper().startswith(hint["quarter"].upper())),
+        quarters[-1] if quarters else None,
+    )
+    if target_quarter is not None:
+        module_id = f"country-{override['code'].lower()}-mandatory"
+        modules = target_quarter.get("modules", []) or []
+        already_present = any(m.get("moduleId") == module_id for m in modules)
+        if not already_present:
+            modules.append({
+                "moduleId": module_id,
+                "title": hint["title"],
+                "whyIncluded": hint["whyIncluded"],
+                "whyExpanded": hint["whyIncluded"],
+                "amlrTrace": [cit["law"] for cit in override["additionalCitations"]],
+                "competencyNeed": "Country-mandatory compliance evidence",
+                "competencyType": "Knowledge",
+                "assessment": hint["assessment"],
+                "approvalStatus": "draft",
+                "lmsStatus": "Country-required — pending approval",
+                "countryMandatory": True,
+                "countryCode": override["code"],
+            })
+            target_quarter["modules"] = modules
+
+    if local_role_label:
+        for assignment in training.get("lmsAssignments", []) or []:
+            assignment["learnerGroup"] = local_role_label
+
+    return result
 
 
 def competency_type_for(title: str, row: dict[str, Any]) -> str:

@@ -26,7 +26,7 @@ from .agent_graph import (
     run_agent_workflow,
 )
 from .storage import add_review_action, build_audit_export, get_run, init_db, list_runs, save_workflow_run
-from .workflow import ROLE_CATALOG, get_role, run_workflow
+from .workflow import ROLE_CATALOG, apply_country_overrides, get_role, run_workflow
 
 
 app = FastAPI(
@@ -457,6 +457,8 @@ def analyze(request: AnalyzeRequest) -> dict[str, Any]:
     except KeyError as exc:
         raise HTTPException(status_code=404, detail="Unknown role id") from exc
 
+    country_code = (request.regulatoryScope or {}).get("country") if request.regulatoryScope else None
+
     if request.useAgent:
         try:
             result = run_agent_workflow(
@@ -469,19 +471,19 @@ def analyze(request: AnalyzeRequest) -> dict[str, Any]:
             save_workflow_run(result)
             return result
         except AgentGraphError as exc:
-            fallback = run_workflow(role)
+            fallback = run_workflow(role, country_code=country_code)
             fallback["executionMode"] = "deterministic-fallback"
             fallback["agentError"] = str(exc)
             save_workflow_run(fallback)
             return fallback
         except Exception as exc:
-            fallback = run_workflow(role)
+            fallback = run_workflow(role, country_code=country_code)
             fallback["executionMode"] = "deterministic-fallback"
             fallback["agentError"] = f"LangGraph workflow failed: {exc}"
             save_workflow_run(fallback)
             return fallback
 
-    fallback = run_workflow(role)
+    fallback = run_workflow(role, country_code=country_code)
     fallback["executionMode"] = "deterministic"
     save_workflow_run(fallback)
     return fallback
@@ -528,6 +530,11 @@ def review_workflow_response(workflow_id: str) -> dict[str, Any]:
             "changeSummary": state.get("changeSummary", []),
             "result": state.get("result"),
         }
+    country_code = (state.get("regulatoryScope") or {}).get("country")
+    if country_code:
+        apply_country_overrides(response, country_code)
+        if response.get("result"):
+            apply_country_overrides(response["result"], country_code)
     return response
 
 
@@ -555,6 +562,8 @@ def run_job(job_id: str, request: AnalyzeRequest, role: dict[str, Any], started:
                         step["output"] = payload["output"]
                     break
 
+    country_code = (request.regulatoryScope or {}).get("country") if request.regulatoryScope else None
+
     try:
         if request.useAgent:
             result = run_agent_workflow(
@@ -566,13 +575,13 @@ def run_job(job_id: str, request: AnalyzeRequest, role: dict[str, Any], started:
                 progress_callback=progress_callback,
             )
         else:
-            result = run_workflow(role)
+            result = run_workflow(role, country_code=country_code)
             result["executionMode"] = "deterministic"
         elapsed_ms = round((time.monotonic() - started) * 1000)
         save_workflow_run(result, job_id=job_id, elapsed_ms=elapsed_ms)
         update_job(job_id, status="complete", result=result, elapsed_ms=elapsed_ms)
     except Exception as exc:
-        fallback = run_workflow(role)
+        fallback = run_workflow(role, country_code=country_code)
         fallback["executionMode"] = "deterministic-fallback"
         fallback["agentError"] = f"LangGraph workflow failed: {exc}"
         elapsed_ms = round((time.monotonic() - started) * 1000)

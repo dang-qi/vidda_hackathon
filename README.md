@@ -13,6 +13,20 @@ React + FastAPI hackathon demo for an AI-powered human-in-the-loop workflow that
 - Role-to-risk-to-regulation explainability.
 - Human review checkpoints before LMS assignment.
 - A lightweight audit and quality view for governance evidence.
+- **Per-country national overlay (Sweden 🇸🇪 · Spain 🇪🇸 · Germany 🇩🇪)**: the same EU regulation produces visibly different output per jurisdiction — national-law citations layered on AMLR articles, localised role labels, a country-mandatory training module in the right quarter, and a colour-coded matrix banner.
+- **Instant country swap for the demo**: when the first multi-agent run completes, the other two countries are pre-fetched in parallel (~250 ms each via the deterministic engine) and cached in the browser. Switching jurisdictions or running the side-by-side compare view becomes a zero-network state swap, so a 5-minute demo or short live presentation can show all three countries back-to-back without re-running the agents.
+
+### Per-country overlay in detail
+
+| Country | National law on the stack | Local role label (KYC Analyst) | Mandatory module | Quarter |
+|---|---|---|---|---|
+| 🇸🇪 SE | FFFS 2017:11, Lag 2017:630 | KYC-analytiker (centralt funktionsansvarig) | Independent review evidence pack | Q4 |
+| 🇪🇸 ES | Ley 10/2010, RD 304/2014, SEPBLAC | Analista KYC (representante ante SEPBLAC) | External expert review preparation | Q4 |
+| 🇩🇪 DE | GwG §6/§7, GwG §10, BaFin AuA | KYC-Analyst (erste Verteidigungslinie) | Deputy MLRO handover protocol | Q3 |
+
+The country layer is **additive** — `riskRegulationMatrix` rows pick up a `nationalCitations[]` array and a `localRoleLabel` on top of their existing AMLR articles, the training plan gets one extra country-mandatory module, and a new top-level `countryOverlay` object is added. Any consumer that doesn't know about country still works.
+
+The overlay is applied **deterministically post-LLM**, so the structured national fields are guaranteed regardless of whether the model honours the prompt — and it works through both `/api/analyze` and the new `/api/workflows` review path.
 
 ## Run Locally
 
@@ -52,11 +66,13 @@ http://127.0.0.1:5173/
 ## Demo Flow
 
 1. Select a challenge role, such as KYC Analyst, Customer Advisor or MLRO.
-2. Run the multi-agent workflow.
-3. Review the risk-regulation-competency matrix.
-4. Change human review status on high-risk mappings.
-5. Open the training path and LMS assignment view.
-6. Open Audit & Quality to show coverage score, reviewer flags and traceability.
+2. Pick a jurisdiction (Sweden / Spain / Germany) from the country picker.
+3. Run the multi-agent workflow.
+4. Review the risk-regulation-competency matrix with the country overlay banner (citations, role labels and mandatory modules tailored to the country).
+5. **Instant country swap** — in the matrix view click another country chip to re-render with cached results, or click `🇪🇸 vs 🇸🇪` to open the side-by-side compare view with auto-generated "Why different?" lines. No re-run, no LLM latency.
+6. Change human review status on high-risk mappings.
+7. Open the training path (the country-mandatory module is highlighted in amber) and LMS assignment view.
+8. Open Audit & Quality to show coverage score, reviewer flags and traceability.
 
 ## API
 
@@ -101,7 +117,8 @@ Optional input fields:
   "regulatoryScope": {
     "jurisdiction": "EU",
     "regulation": "AMLR 2024/1624",
-    "articles": ["9", "10", "11", "12", "13", "14"]
+    "articles": ["9", "10", "11", "12", "13", "14"],
+    "country": "SE"
   }
 }
 ```
