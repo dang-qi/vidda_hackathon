@@ -235,11 +235,35 @@ def timed_node(
             progress_callback,
             step_id,
             "complete",
-            {"name": step_name, "elapsedMs": round((time.monotonic() - started) * 1000)},
+            {
+                "name": step_name,
+                "elapsedMs": round((time.monotonic() - started) * 1000),
+                "output": step_output(step_id, output),
+            },
         )
         return output
 
     return wrapped
+
+
+def step_output(step_id: str, output: dict[str, Any]) -> dict[str, Any] | None:
+    output_keys = {
+        "role_parser": ("parsed_role", "Parsed role profile"),
+        "risk_mapper": ("risks", "Risk exposure map"),
+        "regulation_mapper": ("matrix", "Risk-regulation matrix"),
+        "training_designer": ("training_plan", "Training path"),
+        "quality_reviewer": ("quality_review", "Quality review"),
+    }
+    if step_id not in output_keys:
+        return None
+    key, title = output_keys[step_id]
+    if key not in output:
+        return None
+    return {
+        "type": key,
+        "title": title,
+        "data": output[key],
+    }
 
 
 def emit_progress(
