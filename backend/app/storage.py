@@ -367,10 +367,17 @@ def update_approval_status(connection: sqlite3.Connection, run_id: str) -> None:
 
 def derive_approval_status(result: dict[str, Any]) -> str:
     rows = result.get("riskRegulationMatrix") or []
-    if any(row.get("humanReview") == "needs-review" for row in rows):
+    statuses = [row.get("humanReview") for row in rows]
+    if "rejected" in statuses:
+        return "changes_requested"
+    if any(status not in {"accepted", "edited"} for status in statuses):
         return "needs_review"
     if rows:
-        return "in_review"
+        training = result.get("trainingPlan") or {}
+        assignments = training.get("lmsAssignments") or []
+        if any(assignment.get("approvalStatus") == "approved_for_lms" for assignment in assignments):
+            return "approved_for_lms"
+        return "matrix_approved"
     return "needs_review"
 
 

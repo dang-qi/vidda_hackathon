@@ -54,6 +54,38 @@ review_workflows: dict[str, dict[str, Any]] = {}
 jobs_lock = Lock()
 review_workflows_lock = Lock()
 
+MATRIX_READY_STATUSES = {"accepted", "edited"}
+MATRIX_EXCLUDED_STATUSES = {"rejected"}
+
+
+def matrix_blockers(matrix: list[dict[str, Any]]) -> list[str]:
+    blockers = []
+    for row in matrix:
+        status = str(row.get("humanReview") or "").strip()
+        if status not in MATRIX_READY_STATUSES and status not in MATRIX_EXCLUDED_STATUSES:
+            blockers.append(f"{row.get('id', 'row')}:{status or 'needs-review'}")
+    return blockers
+
+
+def active_matrix_rows(matrix: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [row for row in matrix if str(row.get("humanReview") or "").strip() in MATRIX_READY_STATUSES]
+
+
+def excluded_matrix_rows(matrix: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [row for row in matrix if str(row.get("humanReview") or "").strip() in MATRIX_EXCLUDED_STATUSES]
+
+
+def mark_matrix_changed(state: dict[str, Any], change_summary: list[str]) -> None:
+    state["status"] = "matrix_review"
+    if state.get("result"):
+        state.pop("result", None)
+        change_summary = [
+            *change_summary,
+            "Training path, quality review, and audit pack invalidated because the matrix changed.",
+        ]
+    state["updatedAt"] = datetime.now(timezone.utc).isoformat()
+    state["changeSummary"] = change_summary
+
 
 class CustomRole(BaseModel):
     name: str = Field(default="Custom Role", min_length=1)
@@ -106,6 +138,10 @@ class MatrixStatusRequest(BaseModel):
 
 class MatrixRowUpdateRequest(BaseModel):
     row: dict[str, Any]
+
+
+class RegenerateTrainingRequest(BaseModel):
+    matrix: list[dict[str, Any]] | None = None
 
 
 class TrainingRevisionRequest(BaseModel):
@@ -231,9 +267,7 @@ def revise_workflow_matrix(workflow_id: str, request: NaturalLanguageRevisionReq
             target_id=request.targetId,
         )
         state["matrix"] = revision["updatedRows"]
-        state["status"] = "matrix_review"
-        state["updatedAt"] = datetime.now(timezone.utc).isoformat()
-        state["changeSummary"] = revision.get("changeSummary", [])
+        mark_matrix_changed(state, revision.get("changeSummary", []))
     return review_workflow_response(workflow_id)
 
 
@@ -247,8 +281,7 @@ def update_workflow_matrix_status(workflow_id: str, request: MatrixStatusRequest
             {**row, "humanReview": request.status} if row.get("id") == request.targetId else row
             for row in state["matrix"]
         ]
-        state["updatedAt"] = datetime.now(timezone.utc).isoformat()
-        state["changeSummary"] = [f"Matrix row {request.targetId} marked as {request.status}."]
+        mark_matrix_changed(state, [f"Matrix row {request.targetId} marked as {request.status}."])
     return review_workflow_response(workflow_id)
 
 
@@ -267,8 +300,7 @@ def update_workflow_matrix_row(workflow_id: str, request: MatrixRowUpdateRequest
             for row in state["matrix"]
         ]
         state["matrix"] = sort_matrix_rows_by_level(state["matrix"])
-        state["updatedAt"] = datetime.now(timezone.utc).isoformat()
-        state["changeSummary"] = [f"Matrix row {target_id} edited directly."]
+        mark_matrix_changed(state, [f"Matrix row {target_id} edited directly."])
     return review_workflow_response(workflow_id)
 
 
@@ -282,8 +314,7 @@ def accept_all_workflow_matrix_rows(workflow_id: str) -> dict[str, Any]:
             {**row, "humanReview": "accepted"}
             for row in state["matrix"]
         ]
-        state["updatedAt"] = datetime.now(timezone.utc).isoformat()
-        state["changeSummary"] = ["All matrix rows accepted by reviewer."]
+        mark_matrix_changed(state, ["All matrix rows accepted by reviewer."])
     return review_workflow_response(workflow_id)
 
 
@@ -293,10 +324,17 @@ def approve_workflow_matrix(workflow_id: str) -> dict[str, Any]:
         state = get_review_workflow_state(workflow_id)
         if not state.get("matrix"):
             raise HTTPException(status_code=409, detail="Generate the matrix before approving it.")
-        state["matrix"] = [
-            {**row, "humanReview": "accepted" if row.get("humanReview") == "needs-review" else row.get("humanReview", "accepted")}
-            for row in state["matrix"]
-        ]
+        blockers = matrix_blockers(state["matrix"])
+        if blockers:
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    "Resolve every matrix row before training generation. "
+                    f"Accepted statuses are accepted, edited, or rejected. Blocked rows: {', '.join(blockers)}"
+                ),
+            )
+        if not active_matrix_rows(state["matrix"]):
+            raise HTTPException(status_code=409, detail="At least one accepted or edited matrix row is required for training generation.")
         state["status"] = "matrix_confirmed"
         state["updatedAt"] = datetime.now(timezone.utc).isoformat()
         state["changeSummary"] = ["Risk evidence matrix confirmed for training design."]
@@ -309,16 +347,31 @@ def generate_workflow_training(workflow_id: str) -> dict[str, Any]:
         state = get_review_workflow_state(workflow_id)
         if state["status"] != "matrix_confirmed":
             raise HTTPException(status_code=409, detail="Confirm the matrix before generating training.")
+        blockers = matrix_blockers(state.get("matrix", []))
+        if blockers:
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    "Training generation is blocked by unresolved matrix rows. "
+                    f"Resolve these first: {', '.join(blockers)}"
+                ),
+            )
+        active_rows = active_matrix_rows(state.get("matrix", []))
+        excluded_rows = excluded_matrix_rows(state.get("matrix", []))
+        if not active_rows:
+            raise HTTPException(status_code=409, detail="At least one accepted or edited matrix row is required for training generation.")
         result = finish_reviewed_workflow(
             workflow_id=workflow_id,
             role=state["role"],
             parsed_role=state["roleDraft"],
-            matrix=state["matrix"],
+            matrix=active_rows,
             agents=state["agents"],
             organization_context=state.get("organizationContext"),
             training_constraints=state.get("trainingConstraints"),
             review_policy=state.get("reviewPolicy"),
         )
+        result["excludedMatrixRows"] = excluded_rows
+        result.setdefault("auditPack", {})["excludedMappings"] = len(excluded_rows)
         save_workflow_run(result)
         state["result"] = result
         state["status"] = "complete"
@@ -417,6 +470,41 @@ def history_run(run_id: str) -> dict[str, Any]:
     if not run:
         raise HTTPException(status_code=404, detail="Unknown workflow run")
     return run
+
+
+@app.post("/api/history/runs/{run_id}/training/regenerate")
+def regenerate_training_from_history(run_id: str, request: RegenerateTrainingRequest | None = None) -> dict[str, Any]:
+    run = get_run(run_id)
+    if not run:
+        raise HTTPException(status_code=404, detail="Unknown workflow run")
+    result = run.get("result") or {}
+    matrix = request.matrix if request and request.matrix is not None else result.get("riskRegulationMatrix") or []
+    blockers = matrix_blockers(matrix)
+    if blockers:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "Resolve every matrix row before regenerating training. "
+                f"Accepted statuses are accepted, edited, or rejected. Blocked rows: {', '.join(blockers)}"
+            ),
+        )
+    active_rows = active_matrix_rows(matrix)
+    excluded_rows = excluded_matrix_rows(matrix)
+    if not active_rows:
+        raise HTTPException(status_code=409, detail="At least one accepted or edited matrix row is required for training generation.")
+    role = result.get("role") or run.get("role") or {}
+    parsed_role = result.get("parsedRole") or (result.get("roleInformation") or {}).get("parsedRole") or {}
+    regenerated = finish_reviewed_workflow(
+        workflow_id=run_id,
+        role=role,
+        parsed_role=parsed_role,
+        matrix=active_rows,
+        agents=result.get("agents"),
+    )
+    regenerated["excludedMatrixRows"] = excluded_rows
+    regenerated.setdefault("auditPack", {})["excludedMappings"] = len(excluded_rows)
+    save_workflow_run(regenerated)
+    return regenerated
 
 
 @app.get("/api/history/runs/{run_id}/audit-pack")

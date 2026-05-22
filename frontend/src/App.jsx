@@ -14,6 +14,8 @@ const reviewOptions = [
   { value: "rejected", label: "Rejected" },
 ];
 
+const matrixReadyStatuses = new Set(["accepted", "edited", "rejected"]);
+
 const riskLevelOrder = {
   Critical: 0,
   High: 1,
@@ -362,6 +364,8 @@ function App() {
     try {
       const data = await postJson(`/api/workflows/${workflow.workflowId}/matrix/revise`, { instruction, targetId });
       setWorkflow(data);
+      setAnalysis(null);
+      setActiveStep("matrix");
     } catch {
       setError("Could not revise the matrix.");
     } finally {
@@ -373,13 +377,17 @@ function App() {
   async function directUpdateMatrixRow(updatedRow) {
     if (!updatedRow?.id) return;
     const rowForSave = { ...updatedRow, humanReview: "edited" };
-    if (!analysis && workflow?.workflowId) {
+    if (workflow?.workflowId) {
       setWorkflow((current) => ({
         ...current,
         riskRegulationMatrix: current.riskRegulationMatrix.map((row) =>
           row.id === rowForSave.id ? rowForSave : row,
         ),
+        result: null,
+        status: "matrix_review",
       }));
+      setAnalysis(null);
+      setActiveStep("matrix");
       try {
         const data = await postJson(`/api/workflows/${workflow.workflowId}/matrix/row`, { row: rowForSave });
         setWorkflow(data);
@@ -392,6 +400,7 @@ function App() {
     const beforeRow = analysis.riskRegulationMatrix.find((row) => row.id === rowForSave.id);
     setAnalysis((current) => ({
       ...current,
+      downstreamStale: true,
       riskRegulationMatrix: current.riskRegulationMatrix.map((row) =>
         row.id === rowForSave.id ? rowForSave : row,
       ),
@@ -413,11 +422,15 @@ function App() {
   }
 
   async function acceptAllMatrixRows() {
-    if (!analysis && workflow?.workflowId) {
+    if (workflow?.workflowId) {
       setWorkflow((current) => ({
         ...current,
         riskRegulationMatrix: current.riskRegulationMatrix.map((row) => ({ ...row, humanReview: "accepted" })),
+        result: null,
+        status: "matrix_review",
       }));
+      setAnalysis(null);
+      setActiveStep("matrix");
       try {
         const data = await postJson(`/api/workflows/${workflow.workflowId}/matrix/accept-all`, {});
         setWorkflow(data);
@@ -429,7 +442,7 @@ function App() {
     if (!analysis) return;
     const beforeRows = analysis.riskRegulationMatrix;
     const afterRows = beforeRows.map((row) => ({ ...row, humanReview: "accepted" }));
-    setAnalysis((current) => ({ ...current, riskRegulationMatrix: afterRows }));
+    setAnalysis((current) => ({ ...current, downstreamStale: true, riskRegulationMatrix: afterRows }));
     if (analysis.workflowId) {
       try {
         await Promise.all(afterRows.map((row, index) => recordReviewAction({
@@ -447,7 +460,7 @@ function App() {
   }
 
   async function approveMatrixAndGenerateTraining() {
-    if (!workflow?.workflowId) return;
+    if (!workflow?.workflowId && !analysis?.workflowId) return;
     setIsLoading(true);
     setLoadingMessage({
       title: "Training Designer and Quality Reviewer agents are running.",
@@ -455,17 +468,27 @@ function App() {
     });
     setError("");
     try {
-      await postJson(`/api/workflows/${workflow.workflowId}/matrix/approve`, {});
-      const data = await postJson(`/api/workflows/${workflow.workflowId}/training/generate`, {});
-      setWorkflow(data);
-      if (data.result) {
-        safeStorageSet(LAST_RUN_KEY, data.result.workflowId);
-        setAnalysis(data.result);
+      if (workflow?.workflowId) {
+        await postJson(`/api/workflows/${workflow.workflowId}/matrix/approve`, {});
+        const data = await postJson(`/api/workflows/${workflow.workflowId}/training/generate`, {});
+        setWorkflow(data);
+        if (data.result) {
+          safeStorageSet(LAST_RUN_KEY, data.result.workflowId);
+          setAnalysis(data.result);
+          setActiveStep("training");
+          loadHistory();
+        }
+      } else {
+        const regenerated = await postJson(`/api/history/runs/${analysis.workflowId}/training/regenerate`, {
+          matrix: analysis.riskRegulationMatrix,
+        });
+        safeStorageSet(LAST_RUN_KEY, regenerated.workflowId);
+        setAnalysis(regenerated);
         setActiveStep("training");
         loadHistory();
       }
-    } catch {
-      setError("Could not confirm the matrix and generate the training path.");
+    } catch (err) {
+      setError(err.message || "Could not confirm the matrix and generate the training path.");
     } finally {
       setIsLoading(false);
       setLoadingMessage(null);
@@ -666,13 +689,17 @@ function App() {
     if (!analysis && !workflow) {
       return;
     }
-    if (!analysis && workflow?.workflowId) {
+    if (workflow?.workflowId) {
       setWorkflow((current) => ({
         ...current,
         riskRegulationMatrix: current.riskRegulationMatrix.map((row) =>
           row.id === rowId ? { ...row, humanReview: status } : row,
         ),
+        result: null,
+        status: "matrix_review",
       }));
+      setAnalysis(null);
+      setActiveStep("matrix");
       try {
         const data = await postJson(`/api/workflows/${workflow.workflowId}/matrix/status`, {
           targetId: rowId,
@@ -690,6 +717,7 @@ function App() {
 
     setAnalysis((current) => ({
       ...current,
+      downstreamStale: true,
       riskRegulationMatrix: current.riskRegulationMatrix.map((row) =>
         row.id === rowId ? { ...row, humanReview: status } : row,
       ),
@@ -792,7 +820,12 @@ function App() {
   ).length;
   const roleConfirmed = ["role_confirmed", "matrix_review", "matrix_confirmed", "complete"].includes(workflow?.status);
   const matrixReady = currentMatrix.length > 0;
-  const trainingReady = Boolean(analysis?.trainingPlan);
+  const trainingReady = Boolean(analysis?.trainingPlan && !analysis.downstreamStale);
+  const auditReadiness = analysis?.downstreamStale
+    ? "matrix_review"
+    : analysis?.qualityReview
+      ? `${analysis.qualityReview.overallScore}%`
+      : workflow?.status ?? "pending";
 
   return (
     <main className="app-shell">
@@ -831,7 +864,7 @@ function App() {
           </div>
           <div className="signal-row">
             <span>Audit readiness</span>
-            <strong>{analysis ? `${analysis.qualityReview.overallScore}%` : workflow?.status ?? "pending"}</strong>
+            <strong>{auditReadiness}</strong>
           </div>
         </div>
       </section>
@@ -885,7 +918,7 @@ function App() {
               approveMatrixAndGenerateTraining={approveMatrixAndGenerateTraining}
               isLoading={isLoading}
               loadingMessage={loadingMessage}
-              canGenerateTraining={Boolean(workflow?.workflowId) && !analysis}
+              canGenerateTraining={Boolean(workflow?.workflowId || analysis?.workflowId)}
               selectedCountry={selectedCountry}
               switchCountry={switchCountry}
               job={job}
@@ -1543,7 +1576,14 @@ async function postJson(path, body) {
     body: JSON.stringify(body),
   });
   if (!response.ok) {
-    throw new Error(`${path} failed`);
+    let detail = `${path} failed`;
+    try {
+      const errorBody = await response.json();
+      detail = errorBody.detail || detail;
+    } catch {
+      detail = `${path} failed`;
+    }
+    throw new Error(detail);
   }
   return response.json();
 }
@@ -1724,6 +1764,10 @@ function MatrixView({
   const [targetRowId, setTargetRowId] = useState("");
   const [editingRow, setEditingRow] = useState(null);
   const matrixRows = sortRiskRowsByLevel(analysis.riskRegulationMatrix);
+  const unresolvedRows = matrixRows.filter((row) => !matrixReadyStatuses.has(row.humanReview));
+  const activeRows = matrixRows.filter((row) => ["accepted", "edited"].includes(row.humanReview));
+  const rejectedRows = matrixRows.filter((row) => row.humanReview === "rejected");
+  const canConfirmMatrix = unresolvedRows.length === 0;
 
   function handleReviewAction(row, value) {
     if (value === "edited") {
@@ -1817,8 +1861,28 @@ function MatrixView({
             <p className="section-kicker">Human checkpoint 02</p>
             <h3>Confirm risk evidence before training design</h3>
             <p className="muted-copy">
-              Review the rows first, then accept all, edit one row directly, or ask AI to revise selected evidence before the training agent runs.
+              Review the rows first, then accept all, edit one row directly, or ask AI to revise selected evidence before the training agent runs or reruns.
             </p>
+            {!canConfirmMatrix && (
+              <p className="review-blocker">
+                Resolve {unresolvedRows.length} matrix row{unresolvedRows.length === 1 ? "" : "s"} before training generation. Needs review rows must be accepted, edited, or rejected.
+              </p>
+            )}
+            {rejectedRows.length > 0 && (
+              <p className="review-note">
+                {rejectedRows.length} rejected row{rejectedRows.length === 1 ? "" : "s"} will be excluded from the training and audit agents.
+              </p>
+            )}
+            {canConfirmMatrix && activeRows.length === 0 && (
+              <p className="review-blocker">
+                At least one accepted or edited row is required to generate training.
+              </p>
+            )}
+            {analysis.downstreamStale && canConfirmMatrix && (
+              <p className="review-blocker">
+                Matrix changes invalidated the training path and audit pack. Confirm the matrix to regenerate downstream agent output.
+              </p>
+            )}
           </div>
           <div className="conversation-panel">
             <select value={targetRowId} onChange={(event) => setTargetRowId(event.target.value)}>
@@ -1852,7 +1916,7 @@ function MatrixView({
               <button
                 className="primary-action compact-action"
                 onClick={approveMatrixAndGenerateTraining}
-                disabled={isLoading || workflowStatus === "complete"}
+                disabled={isLoading || workflowStatus === "complete" || !canConfirmMatrix || activeRows.length === 0}
               >
                 Confirm matrix and generate training
               </button>
@@ -2512,6 +2576,12 @@ function AuditView({
               <dt>Human reviews</dt>
               <dd>{approvedCount}/{analysis.riskRegulationMatrix.length}</dd>
             </div>
+            {analysis.auditPack.excludedMappings > 0 && (
+              <div>
+                <dt>Excluded mappings</dt>
+                <dd>{analysis.auditPack.excludedMappings}</dd>
+              </div>
+            )}
             <div>
               <dt>Quality score</dt>
               <dd>{analysis.auditPack.qualityScore}%</dd>

@@ -622,6 +622,28 @@ h3 {
   line-height: 1.45;
 }
 
+.review-blocker {
+  margin-top: 10px;
+  padding: 10px 12px;
+  border: 1px solid #bd4b3f;
+  background: #fff3f1;
+  color: #7f2d25;
+  font-size: 0.92rem;
+  font-weight: 750;
+  line-height: 1.4;
+}
+
+.review-note {
+  margin-top: 10px;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  background: var(--blue-pale);
+  color: var(--deep);
+  font-size: 0.92rem;
+  font-weight: 750;
+  line-height: 1.4;
+}
+
 .modal-backdrop {
   position: fixed;
   inset: 0;
